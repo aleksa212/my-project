@@ -1,0 +1,78 @@
+@import "tailwindcss";
+
+body {
+  margin: 0;
+}
+
+/* =========================
+   AG GRID ROW/CELL CLEANUP
+   (safe: only visual borders)
+========================= */
+
+.ag-theme-alpine .ag-cell {
+  border-bottom: none !important;
+}
+
+/* =========================
+   VEHICLE COLOR RULES
+========================= */
+
+.veh-exec {
+  background-color: #22c55e !important;
+  color: black;
+}
+
+.veh-minivan {
+  background-color: #f59e0b !important;
+  color: black;
+}
+
+.ag-header-cell.checkbox-center,
+.ag-cell.checkbox-center {
+  display: flex !important;
+  justify-content: center !important;
+  align-items: center !important;
+  padding: 0 !important;
+}
+
+/* IMPORTANT: override AG Grid internal header layout */
+.ag-header-cell.checkbox-center .ag-header-cell-comp-wrapper {
+  display: flex !important;
+  justify-content: center !important;
+  align-items: center !important;
+  width: 100%;
+  height: 100%;
+}
+
+/* THIS is the actual checkbox container */
+.ag-header-cell.checkbox-center .ag-header-select-all {
+  display: flex !important;
+  justify-content: center !important;
+  align-items: center !important;
+  width: 100%;
+}
+
+/* FORCE checkbox itself to center */
+.ag-header-cell.checkbox-center input {
+  margin: 0 auto !important;
+}
+
+.ag-theme-alpine .ag-cell,
+.ag-theme-alpine .ag-header-cell {
+  border-right: 1px solid #e5e7eb;
+}
+
+.ag-pinned-left-header,
+.ag-pinned-left-cols-container {
+  border-right: 1px solid #e5e7eb !important;
+  box-shadow: none !important;
+}
+
+.ag-theme-alpine .ag-row {
+  border-bottom: 1px solid #e5e7eb;
+}
+
+.row-dim {
+  opacity: 0.5;
+  transition: opacity 0.15s ease;
+}

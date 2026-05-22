@@ -44,14 +44,6 @@ export function Table({
     const menuRef = useRef(null);
 
     // ======================
-    // GRID FILTER (quick filter sync)
-    // ======================
-    useEffect(() => {
-        if (!gridApi) return;
-        gridApi.setGridOption("quickFilterText", searchText || "");
-    }, [searchText, gridApi]);
-
-    // ======================
     // SAFE VALUES
     // ======================
     const safeSearchText = searchText ?? "";
@@ -65,9 +57,13 @@ export function Table({
         const matchesAirportFilter = (row) => {
             if (airportFilter.length === 0) return true;
 
-            const puCode = row.PUlocation?.slice(0, 3); // "RDU"
+            const puCode = row.PUlocation?.slice(0, 3);
+            const doCode = row.DOlocation?.slice(0, 3);
 
-            return airportFilter.includes(puCode);
+            return (
+                airportFilter.includes(puCode) ||
+                airportFilter.includes(doCode)
+            );
         };
 
         const normalizeDate = (dateStr) => {
@@ -78,12 +74,15 @@ export function Table({
         };
 
         return rowData.filter((row) => {
+            const searchBlob = `
+                    ${Object.values(row).join(" ")}
+                    ${formatLocationWithFlight(row.PUlocation, row.FlightNumber)}
+                    ${formatLocationWithFlight(row.DOlocation, row.FlightNumber)}
+                `.toLowerCase();
+
             const matchesText =
                 safeSearchText === "" ||
-                Object.values(row)
-                    .join(" ")
-                    .toLowerCase()
-                    .includes(safeSearchText.toLowerCase());
+                searchBlob.includes(safeSearchText.toLowerCase());
 
             const matchesId =
                 safeIdSearch === "" ||

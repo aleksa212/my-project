@@ -85,14 +85,14 @@ export default function SelectedMenu({ selectedRows, setRowData, setSelectedRows
             VEHtype: b.VEHtype,
             VEHnumber: b.VEHnumber,
             Driver: b.Driver,
-            Status: "Dispatched"
+            Status: "dispatched"
         };
 
         const swapPayloadB = {
             VEHtype: a.VEHtype,
             VEHnumber: a.VEHnumber,
             Driver: a.Driver,
-            Status: "Dispatched"
+            Status: "dispatched"
         };
 
         try {

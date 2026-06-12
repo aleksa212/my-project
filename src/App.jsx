@@ -64,7 +64,7 @@ function App() {
 
 
   return (
-    <>
+    <div className="h-screen overflow-hidden flex flex-col">
       {reservationOpen && (
         <NewReservation
           setReservationOpen={setReservationOpen}
@@ -105,7 +105,7 @@ function App() {
         refreshKey={refreshKey}
         airportFilter={airportFilter}
       />
-    </>
+    </div>
   );
 }
 

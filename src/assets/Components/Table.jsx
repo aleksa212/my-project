@@ -4,7 +4,7 @@ import { AllCommunityModule } from "ag-grid-community";
 import { AgGridProvider } from "ag-grid-react";
 
 import { useReservations } from "./useReservations";
-import { resolveLocation, formatLocationWithFlight } from "./Airports";
+import { resolveLocation, formatLocationWithFlight, normalizeToCode } from "./Airports";
 import SelectedMenu from "./SelectedMenu";
 
 const modules = [AllCommunityModule];
@@ -55,14 +55,21 @@ export function Table({
     // ======================
     const filteredData = useMemo(() => {
         const matchesAirportFilter = (row) => {
-            if (airportFilter.length === 0) return true;
+            if (!airportFilter || airportFilter.length === 0) return true;
 
-            const puCode = row.PUlocation?.slice(0, 3);
-            const doCode = row.DOlocation?.slice(0, 3);
+            const puCode =
+                row.PUlocationCode ||
+                normalizeToCode(row.PUlocationCode) ||
+                null;
+
+            const doCode =
+                row.DOlocationCode ||
+                normalizeToCode(row.DOlocationCode) ||
+                null;
 
             return (
-                airportFilter.includes(puCode) ||
-                airportFilter.includes(doCode)
+                (puCode && airportFilter.includes(puCode)) ||
+                (doCode && airportFilter.includes(doCode))
             );
         };
 
@@ -75,10 +82,10 @@ export function Table({
 
         return rowData.filter((row) => {
             const searchBlob = `
-                    ${Object.values(row).join(" ")}
-                    ${formatLocationWithFlight(row.PUlocation, row.FlightNumber)}
-                    ${formatLocationWithFlight(row.DOlocation, row.FlightNumber)}
-                `.toLowerCase();
+                    ${row.PUlocationCode || ""}
+                    ${row.DOlocationCode || ""}
+                    ${row.FlightNumber || ""}
+                    `.toLowerCase();
 
             const matchesText =
                 safeSearchText === "" ||
@@ -107,7 +114,7 @@ export function Table({
             headerName: "",
             checkboxSelection: true,
             headerCheckboxSelection: true,
-            width: 30,
+            maxWidth: 40,
             pinned: "left",
             suppressSizeToFit: true,
             resizable: false,
@@ -122,15 +129,15 @@ export function Table({
         {
             field: "PUdate",
             headerName: "PU Date",
-            valueFormatter: (params) => {
-                if (!params.value) return "";
-                const d = new Date(params.value);
+            valueFormatter: (p) => {
+                if (!p.value) return "";
+                const d = new Date(p.value);
                 if (isNaN(d.getTime())) return "";
                 return d.toLocaleDateString();
-            }
+            },
         },
 
-        { field: "PUtime", headerName: "PU Time", sort: "asc" },
+        { field: "PUtime", headerName: "PU Time", sort: "asc", maxWidth: 80 },
 
         {
             field: "PUlocation",
@@ -138,10 +145,33 @@ export function Table({
             wrapText: true,
             autoHeight: true,
             minWidth: 250,
-            valueFormatter: (p) =>
-                formatLocationWithFlight(p.value, p.data?.FlightNumber),
+
+            valueGetter: (p) => {
+                const code = p.data?.PUlocationCode;
+
+                // airport case
+                if (code) return code;
+
+                // fallback to raw address
+                return p.data?.PUlocation || "";
+            },
+
+            valueFormatter: (p) => {
+                const code = p.data?.PUlocationCode;
+                const raw = p.data?.PUlocation;
+
+                if (code) {
+                    return formatLocationWithFlight(code, p.data?.FlightNumber);
+                }
+
+                return raw || "";
+            },
+
             cellClassRules: {
-                "bg-yellow-400": (p) => /^[A-Z]{3}$/.test(p.value)
+                "bg-yellow-400": (p) =>
+                    /^[A-Z]{3}$/.test(
+                        p.data?.PUlocationCode || normalizeToCode(p.data?.PUlocation)
+                    )
             }
         },
 
@@ -151,15 +181,36 @@ export function Table({
             wrapText: true,
             autoHeight: true,
             minWidth: 250,
-            valueFormatter: (p) =>
-                formatLocationWithFlight(p.value, p.data?.FlightNumber),
+
+            valueGetter: (p) => {
+                const code = p.data?.DOlocationCode;
+
+                if (code) return code;
+
+                return p.data?.DOlocation || "";
+            },
+
+            valueFormatter: (p) => {
+                const code = p.data?.DOlocationCode;
+                const raw = p.data?.DOlocation;
+
+                if (code) {
+                    return formatLocationWithFlight(code, p.data?.FlightNumber);
+                }
+
+                return raw || "";
+            },
+
             cellClassRules: {
-                "bg-yellow-400": (p) => /^[A-Z]{3}$/.test(p.value)
+                "bg-yellow-400": (p) =>
+                    /^[A-Z]{3}$/.test(
+                        p.data?.DOlocationCode || normalizeToCode(p.data?.DOlocation)
+                    )
             }
         },
 
-        { field: "FLTscheduled", headerName: "Flt Scheduled" },
-        { field: "FLTactual", headerName: "Flt Actual" },
+        { field: "FLTscheduled", headerName: "Flt Sch", maxWidth: 100 },
+        { field: "FLTactual", headerName: "Flt Act", maxWidth: 100 },
 
         {
             field: "VEHtype",
@@ -183,7 +234,7 @@ export function Table({
             tooltipValueGetter: (p) => p.value
         },
 
-        { field: "PAX", headerName: "PAX" },
+        { field: "PAX", headerName: "Pax", maxWidth: 40 },
         { field: "TripInfo", headerName: "Trip Info" },
         { field: "FLTstatus", headerName: "Flt Status" }
     ]);
@@ -225,7 +276,7 @@ export function Table({
     return (
         <AgGridProvider modules={modules}>
             <div
-                className="ag-theme-alpine [height:calc(100vh-44px)] w-full overflow-hidden flex flex-col"
+                className="ag-theme-alpine flex-1 overflow-hidden flex flex-col w-full"
                 onContextMenu={(e) => {
                     // only block inside grid rows
                     if (e.target.closest(".ag-row")) {
@@ -255,7 +306,7 @@ export function Table({
                             minWidth: 80,
                             autoHeight: true,
                             cellClass: "!text-[12px] !px-1",
-                            headerClass: "!text-[16px] font-semibold !px-0"
+                            headerClass: "!text-[12px] font-semibold !px-1"
                         }}
                         getRowStyle={(p) => {
                             switch (p.data?.Status) {

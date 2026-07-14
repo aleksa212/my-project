@@ -1,5 +1,8 @@
 import { airportMap } from "./Airports";
 import { useState } from "react";
+import DriversModal from "./DriversModal";
+import VehiclesModal from "./VehiclesModal";
+import AutoDispatchModal from "./AutoDispatchModal";
 
 export function Header({
     searchText,
@@ -14,12 +17,15 @@ export function Header({
     savedFilters,
     setSavedFilters,
     activeFilter,
-    setActiveFilter
+    setActiveFilter,
+    setRefreshKey
 }) {
 
     const [deleteMode, setDeleteMode] = useState(false);
     const [filterToDelete, setFilterToDelete] = useState(null);
-
+    const [driversOpen, setDriversOpen] = useState(false);
+    const [vehiclesOpen, setVehiclesOpen] = useState(false);
+    const [autoDispatchOpen, setAutoDispatchOpen] = useState(false);
 
     const airports = Object.keys(airportMap);
 
@@ -35,20 +41,15 @@ export function Header({
                 "Content-Type": "application/json",
                 Authorization: `Bearer ${token}`
             },
-            body: JSON.stringify({
-                name,
-                airports: airportFilter
-            })
+            body: JSON.stringify({ name, airports: airportFilter })
         });
 
         const data = await res.json();
         setSavedFilters(data);
 
-        // ✅ RESET STATE AFTER SAVE
         setAirportFilter([]);
         setActiveFilter(null);
     };
-
 
     const clearFilters = () => {
         setSearchText("");
@@ -68,7 +69,6 @@ export function Header({
     return (
         <div className="mb-2 flex flex-wrap gap-2 items-center">
 
-            {/* SEARCH */}
             <input
                 className="p-1 border-2 border-solid rounded-sm border-gray-200 hover:border-black"
                 type="text"
@@ -77,7 +77,6 @@ export function Header({
                 onChange={(e) => setSearchText(e.target.value)}
             />
 
-            {/* DATE */}
             <input
                 className="p-1 border-2 border-solid rounded-sm border-gray-200 hover:border-black"
                 type="date"
@@ -85,7 +84,6 @@ export function Header({
                 onChange={(e) => setSelectedDate(e.target.value)}
             />
 
-            {/* ID SEARCH */}
             <input
                 className="p-1 border-2 border-solid rounded-sm border-gray-200 hover:border-black"
                 type="text"
@@ -94,9 +92,6 @@ export function Header({
                 onChange={(e) => setIdSearch(e.target.value)}
             />
 
-            {/* =========================
-                PU AIRPORT SELECT
-            ========================= */}
             <select
                 className="p-1 border rounded"
                 onChange={(e) => {
@@ -113,23 +108,15 @@ export function Header({
             >
                 <option value="">+ Airport Filter</option>
                 {airports.map(code => (
-                    <option key={code} value={code}>
-                        {code}
-                    </option>
+                    <option key={code} value={code}>{code}</option>
                 ))}
             </select>
 
-            <button
-                className="p-1 border rounded bg-blue-200 hover:bg-blue-300"
-                onClick={saveFilter}
-            >
+            <button className="p-1 border rounded bg-blue-200 hover:bg-blue-300" onClick={saveFilter}>
                 Save Filter
             </button>
 
-            <button
-                className="p-1 border rounded bg-red-200 hover:bg-red-300"
-                onClick={() => setDeleteMode(true)}
-            >
+            <button className="p-1 border rounded bg-red-200 hover:bg-red-300" onClick={() => setDeleteMode(true)}>
                 Delete Filter
             </button>
 
@@ -149,23 +136,14 @@ export function Header({
             >
                 <option value="">Saved Filters</option>
                 {savedFilters.map(f => (
-                    <option key={f.name} value={f.name}>
-                        {f.name}
-                    </option>
+                    <option key={f.name} value={f.name}>{f.name}</option>
                 ))}
-
-
             </select>
 
-            {/* CLEAR FILTERS */}
-            <button
-                className="p-1 border rounded bg-gray-200 hover:bg-gray-300"
-                onClick={clearFilters}
-            >
+            <button className="p-1 border rounded bg-gray-200 hover:bg-gray-300" onClick={clearFilters}>
                 Clear Filters
             </button>
 
-            {/* NEW RESERVATION */}
             <button
                 className="p-1 rounded-sm border-0 bg-orange-500 hover:shadow-xl hover:bg-orange-600 text-white"
                 onClick={() => setReservationOpen(true)}
@@ -173,18 +151,33 @@ export function Header({
                 New Res
             </button>
 
-            {/* =========================
-                ACTIVE FILTER DISPLAY
-            ========================= */}
+            <button
+                className="p-1 rounded-sm border-0 bg-teal-600 hover:shadow-xl hover:bg-teal-700 text-white"
+                onClick={() => setDriversOpen(true)}
+            >
+                Drivers
+            </button>
+
+            <button
+                className="p-1 rounded-sm border-0 bg-cyan-600 hover:shadow-xl hover:bg-cyan-700 text-white"
+                onClick={() => setVehiclesOpen(true)}
+            >
+                Vehicles
+            </button>
+
+            <button
+                className="p-1 rounded-sm border-0 bg-indigo-600 hover:shadow-xl hover:bg-indigo-700 text-white"
+                onClick={() => setAutoDispatchOpen(true)}
+            >
+                Auto Dispatch
+            </button>
 
             <div className="flex gap-2 flex-wrap w-full mt-2">
                 {airportFilter.map(code => (
                     <span
                         key={code}
                         className="px-2 py-1 bg-blue-100 rounded cursor-pointer"
-                        onClick={() =>
-                            setAirportFilter(prev => prev.filter(c => c !== code))
-                        }
+                        onClick={() => setAirportFilter(prev => prev.filter(c => c !== code))}
                     >
                         {code} ✕
                     </span>
@@ -194,36 +187,25 @@ export function Header({
             {deleteMode && (
                 <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50">
                     <div className="bg-white rounded shadow p-4 w-[350px]">
-
-                        <div className="font-semibold mb-3">
-                            Delete Saved Filter
-                        </div>
+                        <div className="font-semibold mb-3">Delete Saved Filter</div>
 
                         <select
                             className="p-2 border rounded w-full"
                             onChange={(e) => {
-                                const selected = savedFilters.find(
-                                    f => f.name === e.target.value
-                                );
+                                const selected = savedFilters.find(f => f.name === e.target.value);
                                 setFilterToDelete(selected);
                             }}
                         >
                             <option value="">Choose filter</option>
                             {savedFilters.map(f => (
-                                <option key={f.name} value={f.name}>
-                                    {f.name}
-                                </option>
+                                <option key={f.name} value={f.name}>{f.name}</option>
                             ))}
                         </select>
 
                         <div className="flex justify-end gap-2 mt-4">
-
                             <button
                                 className="px-3 py-1 bg-gray-200 rounded"
-                                onClick={() => {
-                                    setDeleteMode(false);
-                                    setFilterToDelete(null);
-                                }}
+                                onClick={() => { setDeleteMode(false); setFilterToDelete(null); }}
                             >
                                 Cancel
                             </button>
@@ -234,28 +216,19 @@ export function Header({
                                 onClick={async () => {
                                     if (!filterToDelete) return;
 
-                                    const confirmDelete = window.confirm(
-                                        `Delete filter "${filterToDelete.name}"?`
-                                    );
-
+                                    const confirmDelete = window.confirm(`Delete filter "${filterToDelete.name}"?`);
                                     if (!confirmDelete) return;
 
                                     const token = localStorage.getItem("token");
 
                                     const res = await fetch(
                                         `http://localhost:5000/filters/${filterToDelete.name}`,
-                                        {
-                                            method: "DELETE",
-                                            headers: {
-                                                Authorization: `Bearer ${token}`
-                                            }
-                                        }
+                                        { method: "DELETE", headers: { Authorization: `Bearer ${token}` } }
                                     );
 
                                     const data = await res.json();
                                     setSavedFilters(data);
 
-                                    // reset UI
                                     setFilterToDelete(null);
                                     setDeleteMode(false);
 
@@ -267,10 +240,24 @@ export function Header({
                             >
                                 Confirm
                             </button>
-
                         </div>
                     </div>
                 </div>
+            )}
+
+            {driversOpen && (
+                <DriversModal onClose={() => setDriversOpen(false)} />
+            )}
+
+            {vehiclesOpen && (
+                <VehiclesModal onClose={() => setVehiclesOpen(false)} />
+            )}
+
+            {autoDispatchOpen && (
+                <AutoDispatchModal
+                    onClose={() => setAutoDispatchOpen(false)}
+                    onCommitted={() => setRefreshKey(prev => prev + 1)}
+                />
             )}
         </div>
     );

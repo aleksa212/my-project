@@ -3,6 +3,8 @@ import { Header } from "./assets/Components/Header";
 import { Table } from "./assets/Components/Table";
 import NewReservation from "./assets/Components/NewReservation";
 import { useNavigate } from "react-router-dom";
+import { DriversProvider } from "./assets/Components/DriversContext";
+import { VehiclesProvider } from "./assets/Components/VehiclesContext";
 
 function App() {
   const [searchText, setSearchText] = useState("");
@@ -12,14 +14,8 @@ function App() {
   const [selectedReservation, setSelectedReservation] = useState(null);
   const [refreshKey, setRefreshKey] = useState(0);
 
-  // ======================
-  // AIRPORT FILTER (Step 3+5)
-  // ======================
   const [airportFilter, setAirportFilter] = useState([]);
 
-  // ======================
-  // SAVED FILTERS (Step 7)
-  // ======================
   const [savedFilters, setSavedFilters] = useState([]);
   const [activeFilter, setActiveFilter] = useState(null);
 
@@ -33,9 +29,6 @@ function App() {
 
   const navigate = useNavigate();
 
-  // ======================
-  // AUTH CHECK
-  // ======================
   useEffect(() => {
     const token = localStorage.getItem("token");
     if (!token) {
@@ -46,13 +39,10 @@ function App() {
   useEffect(() => {
     const fetchFilters = async () => {
       const token = localStorage.getItem("token");
-
       if (!token) return;
 
       const res = await fetch("http://localhost:5000/filters", {
-        headers: {
-          Authorization: `Bearer ${token}`
-        }
+        headers: { Authorization: `Bearer ${token}` }
       });
 
       const data = await res.json();
@@ -62,50 +52,48 @@ function App() {
     fetchFilters();
   }, []);
 
-
   return (
-    <div className="h-screen overflow-hidden flex flex-col">
-      {reservationOpen && (
-        <NewReservation
-          setReservationOpen={setReservationOpen}
-          selectedReservation={selectedReservation}
-          setSelectedReservation={setSelectedReservation}
-          setRefreshKey={setRefreshKey}
-        />
-      )}
+    <DriversProvider>
+      <VehiclesProvider>
+        <div className="h-screen overflow-hidden flex flex-col">
+          {reservationOpen && (
+            <NewReservation
+              setReservationOpen={setReservationOpen}
+              selectedReservation={selectedReservation}
+              setSelectedReservation={setSelectedReservation}
+              setRefreshKey={setRefreshKey}
+            />
+          )}
 
-      {/* ======================
-                HEADER (controls everything)
-            ====================== */}
-      <Header
-        searchText={searchText}
-        setSearchText={setSearchText}
-        selectedDate={selectedDate}
-        setSelectedDate={setSelectedDate}
-        idSearch={idSearch}
-        setIdSearch={setIdSearch}
-        setReservationOpen={setReservationOpen}
-        airportFilter={airportFilter}
-        setAirportFilter={setAirportFilter}
-        savedFilters={savedFilters}
-        setSavedFilters={setSavedFilters}
-        activeFilter={activeFilter}
-        setActiveFilter={setActiveFilter}
-      />
+          <Header
+            searchText={searchText}
+            setSearchText={setSearchText}
+            selectedDate={selectedDate}
+            setSelectedDate={setSelectedDate}
+            idSearch={idSearch}
+            setIdSearch={setIdSearch}
+            setReservationOpen={setReservationOpen}
+            airportFilter={airportFilter}
+            setAirportFilter={setAirportFilter}
+            savedFilters={savedFilters}
+            setSavedFilters={setSavedFilters}
+            activeFilter={activeFilter}
+            setActiveFilter={setActiveFilter}
+            setRefreshKey={setRefreshKey}
+          />
 
-      {/* ======================
-                TABLE (only consumes filters)
-            ====================== */}
-      <Table
-        searchText={searchText}
-        selectedDate={selectedDate}
-        idSearch={idSearch}
-        setSelectedReservation={setSelectedReservation}
-        setReservationOpen={setReservationOpen}
-        refreshKey={refreshKey}
-        airportFilter={airportFilter}
-      />
-    </div>
+          <Table
+            searchText={searchText}
+            selectedDate={selectedDate}
+            idSearch={idSearch}
+            setSelectedReservation={setSelectedReservation}
+            setReservationOpen={setReservationOpen}
+            refreshKey={refreshKey}
+            airportFilter={airportFilter}
+          />
+        </div>
+      </VehiclesProvider>
+    </DriversProvider>
   );
 }
 

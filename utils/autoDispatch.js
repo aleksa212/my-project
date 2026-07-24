@@ -5,6 +5,7 @@ import { getDriveDurationMinutes } from "../utils/travelTime.js";
 
 const DAY_NAMES = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 const BUFFER_MINUTES = 10;
+const AIRPORT_PICKUP_BUFFER_MINUTES = 20;
 const SWITCH_GAP_MINUTES = 150;
 
 const toMinutes = (timeStr) => {
@@ -23,6 +24,18 @@ const combineDateTime = (dateObj, timeStr) => {
 
 const sameDate = (dateObj, dateStr) =>
     new Date(dateObj).toISOString().slice(0, 10) === dateStr;
+
+// PUlocationCode is only populated when the pickup resolves to an airport
+// code (see reservations.js), so its presence is the airport-pickup flag.
+const isAirportPickup = (trip) => Boolean(trip.PUlocationCode);
+
+// Flight-landing time (PUtime) isn't when the ride actually starts —
+// passengers need time to deplane and get curbside. Everything downstream
+// (arrival deadline, traffic-time basis, freeAt) should key off this.
+const actualDepartureTime = (trip, puDateTime) =>
+    isAirportPickup(trip)
+        ? new Date(puDateTime.getTime() + AIRPORT_PICKUP_BUFFER_MINUTES * 60000)
+        : puDateTime;
 
 /**
  * Replays already-assigned trips to reconstruct today's real schedule.
@@ -57,6 +70,7 @@ async function buildStateFromFixedTrips(fixedTrips, driversForLookup, vehiclesBy
             const puAddress = resolveAddress(t.PUlocationCode, t.PUlocationName, t.PUlocation);
             const doAddress = resolveAddress(t.DOlocationCode, t.DOlocationName, t.DOlocation);
             const puDateTime = combineDateTime(t.PUdate, t.PUtime);
+            const departureTime = actualDepartureTime(t, puDateTime);
 
             let tripFreeAt;
 
@@ -65,11 +79,11 @@ async function buildStateFromFixedTrips(fixedTrips, driversForLookup, vehiclesBy
             } else {
                 let durationMinutes = 0;
                 try {
-                    durationMinutes = await getDriveDurationMinutes(puAddress, doAddress, puDateTime);
+                    durationMinutes = await getDriveDurationMinutes(puAddress, doAddress, departureTime);
                 } catch {
                     // best-effort reconstruction
                 }
-                tripFreeAt = new Date(puDateTime.getTime() + durationMinutes * 60000);
+                tripFreeAt = new Date(departureTime.getTime() + durationMinutes * 60000);
 
                 Reservation.updateOne(
                     { _id: t._id },
@@ -150,6 +164,7 @@ export async function runAutoDispatch(airportCode, dateStr, options = {}) {
         const doAddress = resolveAddress(trip.DOlocationCode, trip.DOlocationName, trip.DOlocation);
         const pax = Number(trip.PAX) || 1;
         const puDateTime = combineDateTime(trip.PUdate, trip.PUtime);
+        const departureTime = actualDepartureTime(trip, puDateTime);
         const puMinutes = toMinutes(trip.PUtime);
 
         const candidates = [];
@@ -184,9 +199,9 @@ export async function runAutoDispatch(airportCode, dateStr, options = {}) {
             const arrivalAtPickup = new Date(
                 state.freeAt.getTime() + (deadheadMinutes + BUFFER_MINUTES) * 60000
             );
-            if (arrivalAtPickup > puDateTime) continue;
+            if (arrivalAtPickup > departureTime) continue;
 
-            const gapMinutes = (puDateTime.getTime() - state.freeAt.getTime()) / 60000;
+            const gapMinutes = (departureTime.getTime() - state.freeAt.getTime()) / 60000;
             const canSwitchVehicle = gapMinutes >= SWITCH_GAP_MINUTES;
 
             if (state.vehicle.capacity >= pax) {
@@ -223,13 +238,13 @@ export async function runAutoDispatch(airportCode, dateStr, options = {}) {
 
         let tripDurationMinutes;
         try {
-            tripDurationMinutes = await getDriveDurationMinutes(puAddress, doAddress, puDateTime);
+            tripDurationMinutes = await getDriveDurationMinutes(puAddress, doAddress, departureTime);
         } catch (err) {
             unassigned.push({ trip, reason: `Could not calculate trip duration: ${err.message}` });
             continue;
         }
 
-        const freeAt = new Date(puDateTime.getTime() + tripDurationMinutes * 60000);
+        const freeAt = new Date(departureTime.getTime() + tripDurationMinutes * 60000);
         const crossesMidnight = freeAt.toDateString() !== puDateTime.toDateString();
         const freeAtMinutes = freeAt.getHours() * 60 + freeAt.getMinutes();
 

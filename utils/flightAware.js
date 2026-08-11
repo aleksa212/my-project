@@ -1,3 +1,5 @@
+import { tryConsumeFlightAwareQuery } from "./flightAwareUsage.js";
+
 const FLIGHTAWARE_API_KEY = process.env.FLIGHTAWARE_API_KEY;
 const BASE_URL = "https://aeroapi.flightaware.com/aeroapi";
 
@@ -25,6 +27,17 @@ export async function getAirportArrivals(airportCode, { maxPages = 3 } = {}) {
     let next = `${BASE_URL}/airports/${encodeURIComponent(airportCode)}/flights/arrivals`;
 
     for (let page = 0; page < maxPages && next; page++) {
+        // Checked BEFORE every request, not just once per call -- a hard
+        // stop, not a warning, so a busy day can't quietly blow past the
+        // free tier one page at a time.
+        const usage = await tryConsumeFlightAwareQuery();
+        if (!usage.allowed) {
+            throw new Error(
+                `FlightAware monthly query cap reached (${usage.count}/${usage.limit}) — ` +
+                `staying in the free tier, no further AeroAPI calls this month`
+            );
+        }
+
         const res = await fetch(next, { headers: { "x-apikey": FLIGHTAWARE_API_KEY } });
         if (!res.ok) {
             const body = await res.json().catch(() => ({}));

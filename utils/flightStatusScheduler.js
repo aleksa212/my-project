@@ -1,6 +1,7 @@
 import { Reservation } from "../models/Reservation.js";
 import { airportTimeZones } from "./airports.js";
 import { getAirportArrivals, matchFlight, summarizeArrival } from "./flightAware.js";
+import { getFlightAwareUsage } from "./flightAwareUsage.js";
 
 const TERMINAL_STATUSES = ["Landed", "Cancelled"];
 
@@ -85,11 +86,13 @@ export async function refreshPendingFlights() {
 export function startFlightStatusPolling(intervalMs) {
     const runAndLog = () => {
         refreshPendingFlights()
-            .then(({ airportsPolled, tripsUpdated, airportErrors }) => {
+            .then(async ({ airportsPolled, tripsUpdated, airportErrors }) => {
                 if (airportsPolled > 0 || tripsUpdated > 0) {
+                    const usage = await getFlightAwareUsage().catch(() => null);
                     console.log(
                         `✈️  Flight status poll: ${airportsPolled} airport(s) checked, ${tripsUpdated} trip(s) updated` +
-                        (airportErrors ? `, ${airportErrors} airport(s) failed` : "")
+                        (airportErrors ? `, ${airportErrors} airport(s) failed` : "") +
+                        (usage ? ` — AeroAPI usage: ${usage.count}/${usage.limit} this month` : "")
                     );
                 }
             })

@@ -21,6 +21,7 @@ export function Table({
     setReservationOpen,
     setSelectedReservation,
     refreshKey,
+    setRefreshKey,
     airportFilter,
     setAirportFilter
 }) {
@@ -29,7 +30,8 @@ export function Table({
         rowData,
         setRowData,
         copyTrip,
-        updateDispatchNotes
+        updateDispatchNotes,
+        cancelTrip
     } = useReservations(refreshKey);
 
     const [gridApi, setGridApi] = useState(null);
@@ -88,7 +90,7 @@ export function Table({
 
             const matchesId =
                 safeIdSearch === "" ||
-                String(row.id || row.ID || "").toLowerCase().includes(safeIdSearch.toLowerCase());
+                String(row.tripNumber ?? "").includes(safeIdSearch);
 
             const matchesDate =
                 safeIdSearch !== "" ||
@@ -145,6 +147,14 @@ export function Table({
 
     const handleAutoDispatchTrip = (data) => {
         setSingleDispatchTrip(data);
+    };
+
+    const handleCancelReservation = async (data) => {
+        const confirmCancel = window.confirm(
+            `Cancel trip ID ${data.tripNumber ?? "?"}? This can't be undone — its ID goes back into the pool for the next new reservation.`
+        );
+        if (!confirmCancel) return;
+        await cancelTrip(data);
     };
 
     return (
@@ -209,6 +219,7 @@ export function Table({
                     onNotes={handleOpenNotes}
                     onLogs={handleOpenLogs}
                     onAutoDispatch={handleAutoDispatchTrip}
+                    onCancel={handleCancelReservation}
                 />
 
                 <SelectedMenu
@@ -216,6 +227,7 @@ export function Table({
                     setRowData={setRowData}
                     setSelectedRows={setSelectedRows}
                     gridApi={gridApi}
+                    setRefreshKey={setRefreshKey}
                 />
             </div>
 

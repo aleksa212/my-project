@@ -1,9 +1,11 @@
 import express from "express";
 import { Reservation } from "../models/Reservation.js";
 import { auth } from "../middleware/auth.js";
-import { getAirportCode, getAirportName } from "../utils/airports.js";
+import { getAirportCode, getAirportName, airportTimeZones } from "../utils/airports.js";
 import { getVehicleType } from "../utils/vehicles.js";
 import { createLogs } from "../utils/logs.js";
+import { claimNextTripNumber, releaseTripNumber } from "../utils/tripNumbers.js";
+import { getAirportArrivals, matchFlight, summarizeArrival } from "../utils/flightAware.js";
 
 const router = express.Router();
 
@@ -14,10 +16,102 @@ router.get("/", async (req, res) => {
     res.json(data);
 });
 
+/* ==================== TRIP NUMBER CLAIM/RELEASE ====================
+   The "New Reservation" form claims a number the moment it opens, so
+   the dispatcher sees the exact ID that will be saved before they've
+   even finished filling the form out. If they close without saving,
+   the frontend calls release so that number goes back into the gap
+   pool instead of being burned. Both routes must come before "/:id" so
+   Express doesn't try to match "next-trip-id"/"release-trip-id" as an
+   :id param.
+======================================================== */
+
+router.post("/next-trip-id", auth, async (req, res) => {
+    try {
+        const tripNumber = await claimNextTripNumber();
+        res.json({ tripNumber });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+router.post("/release-trip-id", auth, async (req, res) => {
+    try {
+        const { tripNumber } = req.body;
+        await releaseTripNumber(tripNumber);
+        res.json({ ok: true });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+/* ==================== FLIGHT INFO REFRESH ====================
+   One AeroAPI call per airport covers every arriving flight there,
+   rather than one call per reservation — matched locally against each
+   trip's FlightNumber. Only trips whose pickup IS the airport are in
+   scope (PUlocationCode === airportCode) — hotel pickups/departures
+   don't need arrival tracking. AeroAPI only has schedule data for
+   roughly the past ~11 days through ~2 days ahead; a date further out
+   than that will just come back with nothing matched yet, which is
+   normal, not an error.
+================================================================= */
+router.post("/refresh-flights", auth, async (req, res) => {
+    try {
+        const { airportCode, date } = req.body;
+        if (!airportCode || !date) {
+            return res.status(400).json({ error: "airportCode and date are required" });
+        }
+
+        const timeZone = airportTimeZones[airportCode];
+        if (!timeZone) {
+            return res.status(400).json({ error: `No time zone configured for airport "${airportCode}"` });
+        }
+
+        const arrivals = await getAirportArrivals(airportCode);
+
+        const candidates = await Reservation.find({
+            Area: airportCode,
+            PUlocationCode: airportCode
+        });
+        const tripsForDate = candidates.filter(
+            t => new Date(t.PUdate).toISOString().slice(0, 10) === date
+        );
+
+        const updated = [];
+        const unmatched = [];
+
+        for (const trip of tripsForDate) {
+            const flight = matchFlight(arrivals, trip.FlightNumber, { expectedDate: date, timeZone });
+            if (!flight) {
+                unmatched.push({ tripId: trip._id, FlightNumber: trip.FlightNumber });
+                continue;
+            }
+
+            const { FLTscheduled, FLTactual, FLTstatus } = summarizeArrival(flight, timeZone);
+            trip.FLTscheduled = FLTscheduled;
+            trip.FLTactual = FLTactual;
+            trip.FLTstatus = FLTstatus;
+            await trip.save();
+
+            updated.push({ tripId: trip._id, FlightNumber: trip.FlightNumber, FLTscheduled, FLTactual, FLTstatus });
+        }
+
+        res.json({ updated, unmatched, arrivalsChecked: arrivals.length });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
 /* ==================== CREATE ==================== */
 
 router.post("/", async (req, res) => {
     try {
+        if (req.body.tripNumber == null) {
+            return res.status(400).json({
+                error: "tripNumber is required — claim one via POST /reservations/next-trip-id first"
+            });
+        }
+
         const puCode = getAirportCode(req.body.PUlocation);
         const doCode = getAirportCode(req.body.DOlocation);
 
@@ -191,10 +285,17 @@ router.put("/:id", auth, async (req, res) => {
     }
 });
 
-/* ==================== DELETE ==================== */
+/* ==================== DELETE ====================
+   Cancelling a reservation frees its trip number back into the gap
+   pool, so the next new reservation fills it before the counter grows
+   any further.
+================================================= */
 
-router.delete("/:id", async (req, res) => {
-    await Reservation.findByIdAndDelete(req.params.id);
+router.delete("/:id", auth, async (req, res) => {
+    const reservation = await Reservation.findByIdAndDelete(req.params.id);
+    if (reservation?.tripNumber != null) {
+        await releaseTripNumber(reservation.tripNumber);
+    }
     res.json({ message: "Deleted" });
 });
 

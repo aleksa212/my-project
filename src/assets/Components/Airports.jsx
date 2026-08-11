@@ -23,6 +23,39 @@ export const airportMap = {
     JAN: "Jackson–Medgar Wiley Evers International Airport, Jackson, MS"
 };
 
+/* ==================== AIRPORT TIME ZONES ====================
+   PUtime/DOtime are always entered as local wall-clock time at the
+   trip's Area (airport) — a flight lands "at 7:00", meaning 7:00 in
+   Portland, not 7:00 wherever the dispatcher happens to be sitting.
+   This map lets the grid convert that into the viewer's own local time
+   for a "Local Time" column, since this fleet spans multiple US time
+   zones (Pacific/Mountain/Central/Eastern).
+============================================================ */
+export const airportTimeZones = {
+    PDX: "America/Los_Angeles",
+    LGB: "America/Los_Angeles",
+    SNA: "America/Los_Angeles",
+    ABQ: "America/Denver",
+    FWA: "America/Indiana/Indianapolis",
+    LEX: "America/New_York",
+    MDW: "America/Chicago",
+    IND: "America/Indiana/Indianapolis",
+    HOU: "America/Chicago",
+    IAH: "America/Chicago",
+    PNS: "America/Chicago",
+    VPS: "America/Chicago",
+    GPT: "America/Chicago",
+    ECP: "America/Chicago",
+    CLT: "America/New_York",
+    DTW: "America/Detroit",
+    TPA: "America/New_York",
+    RDU: "America/New_York",
+    ORF: "America/New_York",
+    BDL: "America/New_York",
+    JAX: "America/New_York",
+    JAN: "America/Chicago"
+};
+
 /* ==================== AREA LOCATIONS ====================
    Each key is an airport code (Area).
    Each array entry is { value, label } where:

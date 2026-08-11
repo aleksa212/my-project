@@ -1,6 +1,40 @@
 import { LocationCellRenderer } from "./LocationCellRenderer";
 import { DriverCellRenderer } from "./DriverCellRenderer";
-import { formatLocationWithFlight, normalizeToCode } from "./Airports";
+import { formatLocationWithFlight, normalizeToCode, airportTimeZones } from "./Airports";
+
+/* =============================================
+   Converts a wall-clock date/time in a named IANA
+   time zone (e.g. "07:07 in America/Los_Angeles")
+   into the real UTC instant it represents. There's
+   no timezone-conversion library in this project,
+   so this uses the standard guess-then-correct
+   trick: assume the wall-clock values ARE UTC,
+   check what that instant reads as when formatted
+   back in the target zone, and shift by the
+   difference (which also transparently handles DST,
+   since Intl resolves the correct offset for that
+   specific date).
+============================================= */
+function zonedTimeToUtc(year, month, day, hour, minute, timeZone) {
+    const utcGuess = Date.UTC(year, month - 1, day, hour, minute);
+
+    const dtf = new Intl.DateTimeFormat("en-US", {
+        timeZone,
+        year: "numeric", month: "2-digit", day: "2-digit",
+        hour: "2-digit", minute: "2-digit", second: "2-digit",
+        hour12: false
+    });
+    const parts = Object.fromEntries(
+        dtf.formatToParts(new Date(utcGuess)).map(p => [p.type, p.value])
+    );
+
+    const asIfUtc = Date.UTC(
+        Number(parts.year), Number(parts.month) - 1, Number(parts.day),
+        Number(parts.hour) % 24, Number(parts.minute), Number(parts.second)
+    );
+
+    return new Date(utcGuess + (utcGuess - asIfUtc));
+}
 
 /* =============================================
    RESERVATION GRID COLUMN DEFINITIONS
@@ -29,6 +63,15 @@ export const columnDefs = [
         cellClass: "checkbox-center",
         headerClass: "checkbox-center"
     },
+
+    {
+        field: "tripNumber",
+        headerName: "ID",
+        maxWidth: 70,
+        pinned: "left",
+        valueFormatter: (p) => (p.value != null ? String(p.value) : "")
+    },
+
     { field: "Status", headerName: "Status" },
 
     {
@@ -47,6 +90,39 @@ export const columnDefs = [
     },
 
     { field: "PUtime", headerName: "PU Time", sort: "asc", maxWidth: 80 },
+
+    {
+        headerName: "Local Time",
+        colId: "localPUTime",
+        maxWidth: 90,
+
+        // PUdate is stored as UTC midnight of the intended calendar day
+        // (see reservations.js / the combineDateTime comment in
+        // autoDispatch.js), so its Y-M-D must be read with UTC getters.
+        // PUtime itself is wall-clock time at the trip's Area (airport),
+        // not the viewer's — this converts it to the viewer's own local
+        // time so dispatchers outside that airport's time zone aren't
+        // misreading the pickup time.
+        valueGetter: (p) => {
+            const { PUdate, PUtime, Area } = p.data || {};
+            const tz = Area && airportTimeZones[Area];
+            if (!PUdate || !PUtime || !tz) return null;
+
+            const d = new Date(PUdate);
+            if (isNaN(d.getTime())) return null;
+
+            const [h, m] = PUtime.split(":").map(Number);
+            const instant = zonedTimeToUtc(
+                d.getUTCFullYear(), d.getUTCMonth() + 1, d.getUTCDate(), h, m, tz
+            );
+            return instant.getTime();
+        },
+
+        valueFormatter: (p) => {
+            if (!p.value) return "";
+            return new Date(p.value).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false });
+        }
+    },
 
     {
         field: "PUlocation",

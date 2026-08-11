@@ -8,7 +8,7 @@ import { useVehiclesContext } from "./VehiclesContext";
 // this field," and DOES get sent to the backend as "".
 const UNASSIGNED_VALUE = "__unassigned__";
 
-export default function SelectedMenu({ selectedRows, setRowData, setSelectedRows, gridApi }) {
+export default function SelectedMenu({ selectedRows, setRowData, setSelectedRows, gridApi, setRefreshKey }) {
     const { drivers } = useDriversContext();
     const { vehicles, getVehicleType } = useVehiclesContext();
 
@@ -83,10 +83,101 @@ export default function SelectedMenu({ selectedRows, setRowData, setSelectedRows
                 })
             );
 
+            // cellStyle on Flt Act depends on BOTH PUtime and FLTactual,
+            // but ag-grid only auto-redraws a cell when its OWN bound
+            // value changes -- updating PUtime here doesn't touch
+            // FLTactual's own value, so its red-highlight style stays
+            // stale otherwise. refreshCells({force:true}) didn't clear
+            // it even deferred past React's commit, so this uses
+            // redrawRows instead -- a full destroy-and-rebuild of the
+            // row's cell components rather than a targeted refresh,
+            // which leaves no ambiguity about whether cellStyle reruns.
+            setTimeout(() => {
+                if (!gridApi) return;
+                const ids = new Set(updates.map(u => String(u._id)));
+                const rowNodes = [];
+                gridApi.forEachNode(node => {
+                    if (ids.has(String(node.data?._id))) rowNodes.push(node);
+                });
+                gridApi.redrawRows({ rowNodes });
+            }, 0);
             gridApi?.deselectAll();
             setSelectedRows([]);
+            // The local patch above already shows the change instantly;
+            // this bumps refreshKey so useReservations re-fetches from
+            // the server shortly after, as a soft refresh -- no full
+            // page reload, and it catches anything the local patch
+            // might have missed (e.g. another dispatcher's concurrent
+            // edit) without waiting for the next unrelated remount.
+            setRefreshKey?.((prev) => prev + 1);
         } catch (err) {
             console.error(err);
+        }
+    };
+
+    // Per-row, unlike the shared "PU Time" field above -- each selected
+    // trip's PUtime gets set to ITS OWN FLTactual (the flight's current
+    // actual/estimated arrival from the FlightAware poller), not one
+    // shared value across the whole selection. Rows with no FLTactual
+    // yet (hotel pickups, or an airport pickup that hasn't matched a
+    // flight yet) are silently skipped rather than blocking the rest.
+    const matchableRows = selectedRows.filter(r => r.FLTactual);
+
+    const handleMatchFlightActual = async () => {
+        if (matchableRows.length === 0) return;
+        const token = localStorage.getItem("token");
+
+        try {
+            const updates = await Promise.all(
+                matchableRows.map(async (row) => {
+                    const res = await fetch(`http://localhost:5000/reservations/${row._id}`, {
+                        method: "PUT",
+                        headers: {
+                            "Content-Type": "application/json",
+                            "Authorization": `Bearer ${token}`
+                        },
+                        body: JSON.stringify({ PUtime: row.FLTactual })
+                    });
+                    return res.json();
+                })
+            );
+
+            setRowData((prev) =>
+                prev.map((r) => {
+                    const updated = updates.find((u) => u._id === r._id);
+                    return updated || r;
+                })
+            );
+
+            // cellStyle on Flt Act depends on BOTH PUtime and FLTactual,
+            // but ag-grid only auto-redraws a cell when its OWN bound
+            // value changes -- updating PUtime here doesn't touch
+            // FLTactual's own value, so its red-highlight style stays
+            // stale otherwise. refreshCells({force:true}) didn't clear
+            // it even deferred past React's commit, so this uses
+            // redrawRows instead -- a full destroy-and-rebuild of the
+            // row's cell components rather than a targeted refresh,
+            // which leaves no ambiguity about whether cellStyle reruns.
+            setTimeout(() => {
+                if (!gridApi) return;
+                const ids = new Set(updates.map(u => String(u._id)));
+                const rowNodes = [];
+                gridApi.forEachNode(node => {
+                    if (ids.has(String(node.data?._id))) rowNodes.push(node);
+                });
+                gridApi.redrawRows({ rowNodes });
+            }, 0);
+            gridApi?.deselectAll();
+            setSelectedRows([]);
+            // The local patch above already shows the change instantly;
+            // this bumps refreshKey so useReservations re-fetches from
+            // the server shortly after, as a soft refresh -- no full
+            // page reload, and it catches anything the local patch
+            // might have missed (e.g. another dispatcher's concurrent
+            // edit) without waiting for the next unrelated remount.
+            setRefreshKey?.((prev) => prev + 1);
+        } catch (err) {
+            console.error("Update PU time to flight actual failed:", err);
         }
     };
 
@@ -135,8 +226,33 @@ export default function SelectedMenu({ selectedRows, setRowData, setSelectedRows
                 })
             );
 
+            // cellStyle on Flt Act depends on BOTH PUtime and FLTactual,
+            // but ag-grid only auto-redraws a cell when its OWN bound
+            // value changes -- updating PUtime here doesn't touch
+            // FLTactual's own value, so its red-highlight style stays
+            // stale otherwise. refreshCells({force:true}) didn't clear
+            // it even deferred past React's commit, so this uses
+            // redrawRows instead -- a full destroy-and-rebuild of the
+            // row's cell components rather than a targeted refresh,
+            // which leaves no ambiguity about whether cellStyle reruns.
+            setTimeout(() => {
+                if (!gridApi) return;
+                const ids = new Set([String(updatedA._id), String(updatedB._id)]);
+                const rowNodes = [];
+                gridApi.forEachNode(node => {
+                    if (ids.has(String(node.data?._id))) rowNodes.push(node);
+                });
+                gridApi.redrawRows({ rowNodes });
+            }, 0);
             gridApi?.deselectAll();
             setSelectedRows([]);
+            // The local patch above already shows the change instantly;
+            // this bumps refreshKey so useReservations re-fetches from
+            // the server shortly after, as a soft refresh -- no full
+            // page reload, and it catches anything the local patch
+            // might have missed (e.g. another dispatcher's concurrent
+            // edit) without waiting for the next unrelated remount.
+            setRefreshKey?.((prev) => prev + 1);
         } catch (err) {
             console.error("Swap failed:", err);
         }
@@ -206,6 +322,14 @@ export default function SelectedMenu({ selectedRows, setRowData, setSelectedRows
 
             <button onClick={handleSave} className="bg-blue-600 text-white w-full p-2 rounded">
                 Apply to {selectedRows.length} rows
+            </button>
+
+            <button
+                onClick={handleMatchFlightActual}
+                disabled={matchableRows.length === 0}
+                className="bg-sky-600 text-white w-full p-2 rounded mt-2 disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+                Update PU Time to Flight Actual ({matchableRows.length})
             </button>
 
             {selectedRows.length === 2 && (

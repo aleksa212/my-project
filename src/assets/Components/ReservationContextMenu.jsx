@@ -8,7 +8,8 @@ export default function ReservationContextMenu({
     onCopyTrip,
     onNotes,
     onLogs,
-    onAutoDispatch
+    onAutoDispatch,
+    onCancel
 }) {
     const menuRef = useRef(null);
 
@@ -65,6 +66,15 @@ export default function ReservationContextMenu({
                     onClick={() => { onAutoDispatch(contextMenu.data); onClose(); }}
                 >
                     Auto Dispatch This Trip
+                </div>
+            )}
+
+            {onCancel && (
+                <div
+                    className="p-2 hover:bg-red-100 text-red-700 cursor-pointer border-t"
+                    onClick={async () => { await onCancel(contextMenu.data); onClose(); }}
+                >
+                    Cancel Reservation
                 </div>
             )}
         </div>

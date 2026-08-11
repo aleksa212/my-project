@@ -25,6 +25,38 @@ export const airportMap = {
     JAN: "Jackson–Medgar Wiley Evers International Airport, Jackson, MS"
 };
 
+/* ==================== TIME ZONES ====================
+   Mirrors src/assets/Components/Airports.jsx's airportTimeZones — kept
+   as a separate copy since frontend/backend don't share modules in this
+   project (same pattern as airportMap above). Used to convert AeroAPI's
+   UTC timestamps into the "HH:MM" local time PUtime/FLTscheduled/
+   FLTactual are always entered/displayed in.
+======================================================= */
+export const airportTimeZones = {
+    PDX: "America/Los_Angeles",
+    LGB: "America/Los_Angeles",
+    SNA: "America/Los_Angeles",
+    ABQ: "America/Denver",
+    FWA: "America/Indiana/Indianapolis",
+    LEX: "America/New_York",
+    MDW: "America/Chicago",
+    IND: "America/Indiana/Indianapolis",
+    HOU: "America/Chicago",
+    IAH: "America/Chicago",
+    PNS: "America/Chicago",
+    VPS: "America/Chicago",
+    GPT: "America/Chicago",
+    ECP: "America/Chicago",
+    CLT: "America/New_York",
+    DTW: "America/Detroit",
+    TPA: "America/New_York",
+    RDU: "America/New_York",
+    ORF: "America/New_York",
+    BDL: "America/New_York",
+    JAX: "America/New_York",
+    JAN: "America/Chicago"
+};
+
 /* ==================== HELPERS ==================== */
 
 export const getAirportCode = (value) => {

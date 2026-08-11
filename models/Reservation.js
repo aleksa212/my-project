@@ -15,6 +15,16 @@ const ReservationSchema = new mongoose.Schema({
     Status: { type: String, default: "Unassigned" },
     assignedBy: { type: String, default: null },
 
+    // Human-facing sequential trip ID (1, 2, 3, ...) — distinct from
+    // Mongo's own _id. Claimed atomically via utils/tripNumbers.js
+    // *before* a reservation is saved (see reservations.js), and never
+    // settable through the update route, so it's effectively immutable
+    // in practice; `immutable: true` backs that up at the schema level.
+    // Not `required` here because reservations created before this field
+    // existed don't have one, and `sparse` keeps the unique index from
+    // choking on all those missing values.
+    tripNumber: { type: Number, unique: true, sparse: true, immutable: true },
+
     // Cache of the last-computed PU->DO drive time for this trip, so
     // replaying today's schedule (single-trip auto-dispatch, or a repeat
     // preview) doesn't re-query Google Maps for a trip whose route/timing

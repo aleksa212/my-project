@@ -18,10 +18,18 @@ export function useReservations(refreshKey) {
     // ======================
     const copyTrip = async (trip) => {
         try {
-            const { _id, id, ...rest } = trip;
+            const { _id, id: _unusedId, tripNumber: _unusedTripNumber, ...rest } = trip;
+
+            const token = localStorage.getItem("token");
+            const idRes = await fetch("http://localhost:5000/reservations/next-trip-id", {
+                method: "POST",
+                headers: { Authorization: `Bearer ${token}` }
+            });
+            const { tripNumber: newTripNumber } = await idRes.json();
 
             const copiedTrip = {
                 ...rest,
+                tripNumber: newTripNumber,
                 Status: "Unassigned"
             };
 
@@ -80,10 +88,33 @@ export function useReservations(refreshKey) {
         }
     };
 
+    // ======================
+    // CANCEL (DELETE) TRIP
+    // Frees the trip's ID back into the gap pool server-side (see
+    // reservations.js DELETE route) so the next new reservation fills
+    // it before the counter grows any further.
+    // ======================
+    const cancelTrip = async (reservation) => {
+        try {
+            const id = reservation._id || reservation.id;
+            const token = localStorage.getItem("token");
+
+            await fetch(`http://localhost:5000/reservations/${id}`, {
+                method: "DELETE",
+                headers: { Authorization: `Bearer ${token}` }
+            });
+
+            setRowData(prev => prev.filter(r => (r._id || r.id) !== id));
+        } catch (err) {
+            console.error("Cancel failed:", err);
+        }
+    };
+
     return {
         rowData,
         setRowData,
         copyTrip,
-        updateDispatchNotes
+        updateDispatchNotes,
+        cancelTrip
     };
 }

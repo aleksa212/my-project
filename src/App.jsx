@@ -89,6 +89,7 @@ function App() {
             setSelectedReservation={setSelectedReservation}
             setReservationOpen={setReservationOpen}
             refreshKey={refreshKey}
+            setRefreshKey={setRefreshKey}
             airportFilter={airportFilter}
           />
         </div>

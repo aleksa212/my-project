@@ -108,26 +108,6 @@ export default function TripDetailsFields({ values, setFieldValue }) {
                 placeholder="Flight Number"
             />
 
-            {/* Flt Scheduled / Flt Actual — will be read-only once FlightAware API is connected */}
-            <div className="flex gap-2">
-                <div className="flex flex-col flex-1">
-                    <label className="text-xs text-gray-500 mb-1">Flt Scheduled</label>
-                    <Field
-                        type="time"
-                        name="FLTscheduled"
-                        className="border p-2 rounded"
-                    />
-                </div>
-                <div className="flex flex-col flex-1">
-                    <label className="text-xs text-gray-500 mb-1">Flt Actual</label>
-                    <Field
-                        type="time"
-                        name="FLTactual"
-                        className="border p-2 rounded"
-                    />
-                </div>
-            </div>
-
             <Field
                 type="text"
                 name="PAX"

@@ -1,6 +1,7 @@
 import { Reservation } from "../models/Reservation.js";
 import { Driver } from "../models/Driver.js";
 import { Vehicle } from "../models/Vehicle.js";
+import { DriverDayOverride } from "../models/DriverDayOverride.js";
 import { getDriveDurationMinutes } from "../utils/travelTime.js";
 
 const DAY_NAMES = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
@@ -134,6 +135,14 @@ export async function runAutoDispatch(airportCode, dateStr, options = {}) {
         Vehicle.find({ airportCode })
     ]);
 
+    // Per-date exceptions to the default weekly schedule (call-outs and
+    // one-off hour changes), keyed by driver id for quick lookup below.
+    const dayOverrides = await DriverDayOverride.find({
+        driver: { $in: activeDrivers.map(d => d.id) },
+        date: dateStr
+    });
+    const overrideByDriverId = new Map(dayOverrides.map(o => [String(o.driver), o]));
+
     const tripsForDate = allTripsToday.filter(t => sameDate(t.PUdate, dateStr));
     const fixedTrips = tripsForDate.filter(t => t.Status !== "Unassigned" && t.Driver);
 
@@ -148,9 +157,21 @@ export async function runAutoDispatch(airportCode, dateStr, options = {}) {
     const vehiclesByNumberAll = new Map(allVehiclesAtAirport.map(v => [v.vehicleNumber, v]));
 
     // Active-only — the sole source of candidates for NEW assignments.
+    // A day override can either drop a driver entirely (called out) or
+    // swap in one-off hours for just this date; with no override, it's
+    // whatever their default weekly schedule says for this weekday.
     const eligibleDrivers = activeDrivers
-        .map(d => ({ driver: d, shift: d.schedule.find(s => s.day === dayOfWeek) }))
-        .filter(d => d.shift);
+        .map(d => {
+            const override = overrideByDriverId.get(String(d.id));
+            if (override && override.available === false) return null;
+
+            const shift = override?.startTime && override?.endTime
+                ? { day: dayOfWeek, startTime: override.startTime, endTime: override.endTime }
+                : d.schedule.find(s => s.day === dayOfWeek);
+
+            return shift ? { driver: d, shift } : null;
+        })
+        .filter(Boolean);
     const shiftByDriverId = new Map(eligibleDrivers.map(d => [d.driver.id, d.shift]));
 
     const vehiclesByCapacity = [...activeVehicles].sort((a, b) => a.capacity - b.capacity);
@@ -235,7 +256,8 @@ export async function runAutoDispatch(airportCode, dateStr, options = {}) {
         if (candidates.length === 0) {
             unassigned.push({
                 trip,
-                reason: "No driver/vehicle fits schedule, capacity, vehicle-switch timing, or travel-time constraints"
+                reason: "No driver/vehicle fits schedule, capacity, vehicle-switch timing, or travel-time constraints",
+                reasonCode: "NO_CANDIDATE"
             });
             continue;
         }
@@ -252,7 +274,11 @@ export async function runAutoDispatch(airportCode, dateStr, options = {}) {
         try {
             tripDurationMinutes = await getDriveDurationMinutes(puAddress, doAddress, departureTime);
         } catch (err) {
-            unassigned.push({ trip, reason: `Could not calculate trip duration: ${err.message}` });
+            unassigned.push({
+                trip,
+                reason: `Could not calculate trip duration: ${err.message}`,
+                reasonCode: "DURATION_ERROR"
+            });
             continue;
         }
 
@@ -271,7 +297,8 @@ export async function runAutoDispatch(airportCode, dateStr, options = {}) {
         if (!chosen) {
             unassigned.push({
                 trip,
-                reason: "Completing this trip would run past every eligible driver's scheduled shift end"
+                reason: "Completing this trip would run past every eligible driver's scheduled shift end",
+                reasonCode: "SHIFT_OVERRUN"
             });
             continue;
         }
@@ -294,6 +321,7 @@ export async function runAutoDispatch(airportCode, dateStr, options = {}) {
             tripId: trip._id,
             PUtime: trip.PUtime,
             PUlocation: puAddress,
+            DOlocation: doAddress,
             PAX: trip.PAX,
             driverId: chosen.driver.id,
             driverName: chosen.driver.displayName,
@@ -304,6 +332,107 @@ export async function runAutoDispatch(airportCode, dateStr, options = {}) {
             tripDurationMinutes
         });
     }
+
+    // ---- Double pickup (last resort) ----
+    // A trip that couldn't get its own driver/vehicle above may still be
+    // served by piggybacking onto a driver already committed to the exact
+    // same PU->DO leg at nearly the same time (e.g. two guests from the
+    // same block leaving the same hotel for the same venue a few minutes
+    // apart). This only runs AFTER every trip has had a fair shot at its
+    // own driver — two drivers is always preferred over one when both are
+    // actually available, so this never competes with a normal
+    // assignment, it only catches trips that would otherwise go
+    // unassigned. Airport pickups are excluded entirely: landing/
+    // deplaning timing is too unpredictable to safely stack a second
+    // party on top of it. Deliberately pairs only (not triples) — a
+    // trip used as the "primary" here can't also be piggybacked onto by
+    // yet another trip in the same pass.
+    const DOUBLE_PICKUP_WINDOW_MINUTES = 5;
+    const usedAsPrimary = new Set();
+
+    const placedTrips = [
+        ...assigned.map(a => ({
+            tripId: String(a.tripId),
+            PUlocation: a.PUlocation,
+            DOlocation: a.DOlocation,
+            PUtime: a.PUtime,
+            PAX: Number(a.PAX) || 1,
+            driverId: a.driverId,
+            driverName: a.driverName,
+            vehicleId: a.vehicleId,
+            vehicleNumber: a.vehicleNumber,
+            vehicleCapacity: vehiclesByNumberAll.get(a.vehicleNumber)?.capacity ?? 0,
+            estimatedDropoff: a.estimatedDropoff,
+            tripDurationMinutes: a.tripDurationMinutes,
+            assignedRef: a
+        })),
+        ...fixedTrips.map(t => ({
+            tripId: String(t._id),
+            PUlocation: t.PUlocation,
+            DOlocation: t.DOlocation,
+            PUtime: t.PUtime,
+            PAX: Number(t.PAX) || 1,
+            driverId: null,
+            driverName: t.Driver,
+            vehicleId: null,
+            vehicleNumber: t.VEHnumber,
+            vehicleCapacity: vehiclesByNumberAll.get(t.VEHnumber)?.capacity ?? 0,
+            estimatedDropoff: t.estimatedDropoff,
+            tripDurationMinutes: t.tripDurationMinutes,
+            assignedRef: null
+        }))
+    ];
+
+    const stillUnassigned = [];
+    for (const entry of unassigned) {
+        const { trip, reasonCode } = entry;
+
+        if (reasonCode !== "NO_CANDIDATE" || isAirportPickup(trip)) {
+            stillUnassigned.push(entry);
+            continue;
+        }
+
+        const puAddress = resolveAddress(trip.PUlocationCode, trip.PUlocationName, trip.PUlocation);
+        const doAddress = resolveAddress(trip.DOlocationCode, trip.DOlocationName, trip.DOlocation);
+        const pax = Number(trip.PAX) || 1;
+        const puMinutes = toMinutes(trip.PUtime);
+        const tripId = String(trip._id);
+
+        const partner = placedTrips.find(p =>
+            !usedAsPrimary.has(p.tripId) &&
+            p.tripId !== tripId &&
+            p.PUlocation === puAddress &&
+            p.DOlocation === doAddress &&
+            Math.abs(toMinutes(p.PUtime) - puMinutes) <= DOUBLE_PICKUP_WINDOW_MINUTES &&
+            p.PAX + pax <= p.vehicleCapacity
+        );
+
+        if (!partner) {
+            stillUnassigned.push(entry);
+            continue;
+        }
+
+        usedAsPrimary.add(partner.tripId);
+        if (partner.assignedRef) partner.assignedRef.doublePickupPartnerId = trip._id;
+
+        assigned.push({
+            tripId: trip._id,
+            PUtime: trip.PUtime,
+            PUlocation: puAddress,
+            DOlocation: doAddress,
+            PAX: trip.PAX,
+            driverId: partner.driverId,
+            driverName: partner.driverName,
+            vehicleId: partner.vehicleId,
+            vehicleNumber: partner.vehicleNumber,
+            vehicleSwitched: false,
+            estimatedDropoff: partner.estimatedDropoff,
+            tripDurationMinutes: partner.tripDurationMinutes,
+            doublePickupPartnerId: partner.tripId
+        });
+    }
+    unassigned.length = 0;
+    unassigned.push(...stillUnassigned);
 
     return { assigned, unassigned };
 }

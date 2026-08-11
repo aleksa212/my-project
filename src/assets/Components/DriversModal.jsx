@@ -10,9 +10,18 @@ const emptySchedule = () =>
         return acc;
     }, {});
 
+const scheduleFromEntries = (entries) => {
+    const s = emptySchedule();
+    for (const entry of entries || []) {
+        s[entry.day] = { enabled: true, startTime: entry.startTime, endTime: entry.endTime };
+    }
+    return s;
+};
+
 export default function DriversModal({ onClose }) {
     const { drivers, refreshDrivers } = useDriversContext();
 
+    const [editingId, setEditingId] = useState(null);
     const [airportCode, setAirportCode] = useState("");
     const [name, setName] = useState("");
     const [phone, setPhone] = useState("");
@@ -43,6 +52,27 @@ export default function DriversModal({ onClose }) {
             ...prev,
             [day]: { ...prev[day], [field]: value }
         }));
+    };
+
+    const isEditing = Boolean(editingId);
+
+    const resetForm = () => {
+        setEditingId(null);
+        setAirportCode("");
+        setName("");
+        setPhone("");
+        setEmail("");
+        setSchedule(emptySchedule());
+    };
+
+    const startEdit = (driver) => {
+        setEditingId(driver._id);
+        setAirportCode(driver.airportCode);
+        setName(driver.name);
+        setPhone(driver.phone || "");
+        setEmail(driver.email || "");
+        setSchedule(scheduleFromEntries(driver.schedule));
+        setError("");
     };
 
     const handleSubmit = async (e) => {
@@ -79,33 +109,34 @@ export default function DriversModal({ onClose }) {
         try {
             const token = localStorage.getItem("token");
 
-            const res = await fetch("http://localhost:5000/drivers", {
-                method: "POST",
-                headers: {
-                    "Content-Type": "application/json",
-                    Authorization: `Bearer ${token}`
-                },
-                body: JSON.stringify({
-                    name: name.trim(),
-                    airportCode,
-                    phone,
-                    email,
-                    schedule: scheduleEntries
-                })
-            });
+            const res = await fetch(
+                isEditing
+                    ? `http://localhost:5000/drivers/${editingId}`
+                    : "http://localhost:5000/drivers",
+                {
+                    method: isEditing ? "PUT" : "POST",
+                    headers: {
+                        "Content-Type": "application/json",
+                        Authorization: `Bearer ${token}`
+                    },
+                    body: JSON.stringify({
+                        name: name.trim(),
+                        ...(isEditing ? {} : { airportCode }),
+                        phone,
+                        email,
+                        schedule: scheduleEntries
+                    })
+                }
+            );
 
             if (!res.ok) {
                 const data = await res.json().catch(() => ({}));
-                throw new Error(data.error || data.message || "Failed to add driver");
+                throw new Error(data.error || data.message || `Failed to ${isEditing ? "update" : "add"} driver`);
             }
 
             await res.json();
             refreshDrivers();
-
-            setName("");
-            setPhone("");
-            setEmail("");
-            setSchedule(emptySchedule());
+            resetForm();
         } catch (err) {
             setError(err.message);
         } finally {
@@ -135,6 +166,7 @@ export default function DriversModal({ onClose }) {
             }
 
             refreshDrivers();
+            if (editingId === driver._id) resetForm();
         } catch (err) {
             setError(err.message);
         } finally {
@@ -162,19 +194,24 @@ export default function DriversModal({ onClose }) {
                     fight each other for space. */}
                 <div className="flex-1 min-h-0 grid grid-cols-1 md:grid-cols-2 gap-6 overflow-y-auto md:overflow-visible">
 
-                    {/* ADD CARD */}
+                    {/* ADD / EDIT CARD */}
                     <div className="border rounded-lg bg-gray-50 p-4 flex flex-col md:h-full md:min-h-0">
-                        <h2 className="text-sm font-semibold text-gray-700 mb-3">Add New Driver</h2>
+                        <h2 className="text-sm font-semibold text-gray-700 mb-3">
+                            {isEditing ? `Edit ${airportCode}-${name}` : "Add New Driver"}
+                        </h2>
 
                         <div className="md:flex-1 md:min-h-0 md:overflow-y-auto pr-1">
                             <form onSubmit={handleSubmit} className="flex flex-col gap-3">
 
                                 <div>
-                                    <label className="text-xs text-gray-500 block mb-1">Airport</label>
+                                    <label className="text-xs text-gray-500 block mb-1">
+                                        Airport{isEditing && " (can't be changed once created)"}
+                                    </label>
                                     <select
-                                        className="border p-2 rounded w-full bg-white"
+                                        className="border p-2 rounded w-full bg-white disabled:bg-gray-100 disabled:text-gray-500"
                                         value={airportCode}
                                         onChange={(e) => setAirportCode(e.target.value)}
+                                        disabled={isEditing}
                                     >
                                         <option value="">Select airport</option>
                                         {airportCodes.map(code => (
@@ -257,13 +294,27 @@ export default function DriversModal({ onClose }) {
                                     <div className="text-red-600 text-sm">{error}</div>
                                 )}
 
-                                <button
-                                    type="submit"
-                                    disabled={submitting}
-                                    className="mt-2 bg-orange-500 text-white p-2 rounded hover:bg-orange-600 disabled:opacity-50"
-                                >
-                                    {submitting ? "Adding..." : "Add Driver"}
-                                </button>
+                                <div className="flex gap-2 mt-2">
+                                    <button
+                                        type="submit"
+                                        disabled={submitting}
+                                        className="flex-1 bg-orange-500 text-white p-2 rounded hover:bg-orange-600 disabled:opacity-50"
+                                    >
+                                        {submitting
+                                            ? (isEditing ? "Saving..." : "Adding...")
+                                            : (isEditing ? "Save Changes" : "Add Driver")}
+                                    </button>
+                                    {isEditing && (
+                                        <button
+                                            type="button"
+                                            onClick={resetForm}
+                                            disabled={submitting}
+                                            className="bg-gray-200 text-gray-700 px-4 rounded hover:bg-gray-300 disabled:opacity-50"
+                                        >
+                                            Cancel
+                                        </button>
+                                    )}
+                                </div>
                             </form>
                         </div>
                     </div>
@@ -285,7 +336,7 @@ export default function DriversModal({ onClose }) {
                                                 .map(d => (
                                                     <div
                                                         key={d._id}
-                                                        className="flex items-center justify-between border rounded px-2 py-1.5 text-sm"
+                                                        className={`flex items-center justify-between border rounded px-2 py-1.5 text-sm ${editingId === d._id ? "ring-2 ring-orange-400" : ""}`}
                                                     >
                                                         <div>
                                                             <div className="font-medium">{d.displayName}</div>
@@ -295,13 +346,21 @@ export default function DriversModal({ onClose }) {
                                                                 </div>
                                                             )}
                                                         </div>
-                                                        <button
-                                                            onClick={() => handleRemove(d)}
-                                                            disabled={removingId === d._id}
-                                                            className="text-xs bg-red-500 text-white px-2 py-1 rounded hover:bg-red-600 disabled:opacity-50"
-                                                        >
-                                                            {removingId === d._id ? "Removing..." : "Remove"}
-                                                        </button>
+                                                        <div className="flex gap-1.5">
+                                                            <button
+                                                                onClick={() => startEdit(d)}
+                                                                className="text-xs bg-gray-200 text-gray-700 px-2 py-1 rounded hover:bg-gray-300"
+                                                            >
+                                                                Edit
+                                                            </button>
+                                                            <button
+                                                                onClick={() => handleRemove(d)}
+                                                                disabled={removingId === d._id}
+                                                                className="text-xs bg-red-500 text-white px-2 py-1 rounded hover:bg-red-600 disabled:opacity-50"
+                                                            >
+                                                                {removingId === d._id ? "Removing..." : "Remove"}
+                                                            </button>
+                                                        </div>
                                                     </div>
                                                 ))}
                                         </div>

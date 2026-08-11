@@ -38,7 +38,11 @@ export const columnDefs = [
             if (!p.value) return "";
             const d = new Date(p.value);
             if (isNaN(d.getTime())) return "";
-            return d.toLocaleDateString();
+            // PUdate is stored as UTC midnight of the intended calendar
+            // day, so it must be formatted in UTC terms — plain
+            // toLocaleDateString() reads local components and shows the
+            // previous day in any timezone behind UTC.
+            return d.toLocaleDateString(undefined, { timeZone: "UTC" });
         }
     },
 

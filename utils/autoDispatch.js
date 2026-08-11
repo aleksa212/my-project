@@ -15,11 +15,22 @@ const toMinutes = (timeStr) => {
 
 const resolveAddress = (code, name, raw) => (code && name ? name : raw);
 
+// PUdate is stored as UTC midnight of the intended calendar day (a bare
+// "YYYY-MM-DD" string parses that way — see reservations.js), so its
+// day/month/year must be read back with the UTC getters. Reading them
+// with local getters/setters (the previous bug) shifts the calendar day
+// backward by one in any timezone behind UTC, which silently pushed every
+// "today" trip's computed pickup instant into the past — breaking
+// Google's traffic prediction (it only predicts for future departures).
 const combineDateTime = (dateObj, timeStr) => {
     const [h, m] = timeStr.split(":").map(Number);
-    const d = new Date(dateObj);
-    d.setHours(h, m, 0, 0);
-    return d;
+    const source = new Date(dateObj);
+    return new Date(
+        source.getUTCFullYear(),
+        source.getUTCMonth(),
+        source.getUTCDate(),
+        h, m, 0, 0
+    );
 };
 
 const sameDate = (dateObj, dateStr) =>
@@ -112,7 +123,8 @@ async function buildStateFromFixedTrips(fixedTrips, driversForLookup, vehiclesBy
 
 export async function runAutoDispatch(airportCode, dateStr, options = {}) {
     const { tripIds = null } = options;
-    const dayOfWeek = DAY_NAMES[new Date(dateStr).getDay()];
+    // Same UTC-vs-local reasoning as combineDateTime above.
+    const dayOfWeek = DAY_NAMES[new Date(dateStr).getUTCDay()];
 
     const [allTripsToday, activeDrivers, allDriversAtAirport, activeVehicles, allVehiclesAtAirport] = await Promise.all([
         Reservation.find({ Area: airportCode }),

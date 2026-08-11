@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useLayoutEffect, useRef } from "react";
 
 export default function ReservationContextMenu({
     contextMenu,
@@ -20,6 +20,18 @@ export default function ReservationContextMenu({
         window.addEventListener("mousedown", handleClick);
         return () => window.removeEventListener("mousedown", handleClick);
     }, [onClose]);
+
+    // Flip the menu above the click point when it would otherwise overflow
+    // past the bottom of the viewport. Mutates the DOM node directly
+    // (rather than going through React state) so there's no extra render
+    // and no visible flash at the wrong position.
+    useLayoutEffect(() => {
+        if (!contextMenu || !menuRef.current) return;
+        const el = menuRef.current;
+        const { height } = el.getBoundingClientRect();
+        const fitsBelow = contextMenu.y + height <= window.innerHeight;
+        el.style.top = `${fitsBelow ? contextMenu.y : Math.max(8, contextMenu.y - height)}px`;
+    }, [contextMenu]);
 
     if (!contextMenu) return null;
 

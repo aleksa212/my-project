@@ -436,3 +436,174 @@ export async function runAutoDispatch(airportCode, dateStr, options = {}) {
 
     return { assigned, unassigned };
 }
+
+const fmtTime = (date) =>
+    `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
+
+/**
+ * Re-checks every already-dispatched trip for an airport/date against the
+ * exact same rules runAutoDispatch enforces when making a fresh
+ * assignment — shift coverage, vehicle capacity, and travel-time
+ * feasibility from the driver's previous drop-off. Nothing here creates
+ * or reassigns anything; it only reports what no longer holds, which
+ * matters because a manual edit after the fact (syncing a pickup time to
+ * a flight's actual arrival, swapping a vehicle, etc.) can silently break
+ * a schedule that was valid at commit time.
+ *
+ * Consecutive same-driver trips sharing an identical PU/DO within the
+ * double-pickup window are treated as one physical drive (one combined
+ * capacity check, one advance of the driver's freeAt) rather than two
+ * sequential ones — otherwise a legitimate double pickup would look like
+ * "drive from this address back to this same address," a false conflict.
+ */
+export async function findScheduleConflicts(airportCode, dateStr) {
+    const dayOfWeek = DAY_NAMES[new Date(dateStr).getUTCDay()];
+    const DOUBLE_PICKUP_WINDOW_MINUTES = 5;
+
+    const [allTripsToday, allDrivers, allVehicles] = await Promise.all([
+        Reservation.find({ Area: airportCode }),
+        Driver.find({ airportCode }),
+        Vehicle.find({ airportCode })
+    ]);
+
+    const dayOverrides = await DriverDayOverride.find({
+        driver: { $in: allDrivers.map(d => d.id) },
+        date: dateStr
+    });
+    const overrideByDriverId = new Map(dayOverrides.map(o => [String(o.driver), o]));
+
+    const tripsForDate = allTripsToday.filter(t => sameDate(t.PUdate, dateStr));
+    const fixedTrips = tripsForDate.filter(t => t.Status !== "Unassigned" && t.Driver);
+
+    const vehiclesByNumber = new Map(allVehicles.map(v => [v.vehicleNumber, v]));
+
+    const byDriverName = new Map();
+    for (const t of fixedTrips) {
+        if (!byDriverName.has(t.Driver)) byDriverName.set(t.Driver, []);
+        byDriverName.get(t.Driver).push(t);
+    }
+
+    const conflicts = [];
+
+    for (const [driverName, driverTrips] of byDriverName) {
+        const driver = allDrivers.find(d => d.displayName === driverName);
+        driverTrips.sort((a, b) => toMinutes(a.PUtime) - toMinutes(b.PUtime));
+
+        const override = driver ? overrideByDriverId.get(String(driver.id)) : null;
+        const calledOut = Boolean(override && override.available === false);
+        const shift = driver && !calledOut
+            ? (override?.startTime && override?.endTime
+                ? { startTime: override.startTime, endTime: override.endTime }
+                : driver.schedule.find(s => s.day === dayOfWeek))
+            : null;
+
+        const clusters = [];
+        for (const t of driverTrips) {
+            const puAddress = resolveAddress(t.PUlocationCode, t.PUlocationName, t.PUlocation);
+            const doAddress = resolveAddress(t.DOlocationCode, t.DOlocationName, t.DOlocation);
+            const last = clusters[clusters.length - 1];
+
+            if (
+                last &&
+                last.puAddress === puAddress &&
+                last.doAddress === doAddress &&
+                Math.abs(toMinutes(t.PUtime) - toMinutes(last.trips[0].PUtime)) <= DOUBLE_PICKUP_WINDOW_MINUTES
+            ) {
+                last.trips.push(t);
+            } else {
+                clusters.push({ puAddress, doAddress, trips: [t] });
+            }
+        }
+
+        let lastDropoffAddress = null;
+        let freeAt = null;
+
+        for (const cluster of clusters) {
+            const first = cluster.trips[0];
+            const puDateTime = combineDateTime(first.PUdate, first.PUtime);
+            const departureTime = actualDepartureTime(first, puDateTime);
+            const totalPax = cluster.trips.reduce((sum, t) => sum + (Number(t.PAX) || 1), 0);
+
+            const reasonsByTrip = new Map(cluster.trips.map(t => [t, []]));
+            const addReason = (t, msg) => reasonsByTrip.get(t).push(msg);
+            const addReasonAll = (msg) => cluster.trips.forEach(t => addReason(t, msg));
+
+            if (!driver) {
+                addReasonAll(`Assigned driver "${driverName}" no longer exists`);
+            } else if (calledOut) {
+                addReasonAll(`Driver is called out for ${dateStr}`);
+            } else if (!shift) {
+                addReasonAll(`Driver is not scheduled to work on ${dayOfWeek}`);
+            } else {
+                const shiftStart = toMinutes(shift.startTime);
+                const shiftEnd = toMinutes(shift.endTime);
+                const puMinutes = toMinutes(first.PUtime);
+                if (puMinutes < shiftStart || puMinutes > shiftEnd) {
+                    addReasonAll(`Pickup ${first.PUtime} is outside ${driverName}'s shift (${shift.startTime}-${shift.endTime})`);
+                }
+            }
+
+            // Every trip in a cluster should share one VEHnumber (that's
+            // what makes it a double pickup) -- checked per-trip anyway
+            // in case an edit desynced them.
+            for (const t of cluster.trips) {
+                const veh = vehiclesByNumber.get(t.VEHnumber);
+                if (!veh) {
+                    addReason(t, `Vehicle "${t.VEHnumber}" not found`);
+                } else if (totalPax > veh.capacity) {
+                    addReason(t, `Combined PAX (${totalPax}) exceeds vehicle ${t.VEHnumber}'s capacity (${veh.capacity})`);
+                }
+            }
+
+            if (freeAt && lastDropoffAddress) {
+                try {
+                    const deadheadMinutes = await getDriveDurationMinutes(lastDropoffAddress, cluster.puAddress, freeAt);
+                    const arrivalAtPickup = new Date(freeAt.getTime() + (deadheadMinutes + BUFFER_MINUTES) * 60000);
+                    if (arrivalAtPickup > departureTime) {
+                        addReasonAll(
+                            `Driver can't reach this pickup from the previous drop-off in time ` +
+                            `(would arrive ~${fmtTime(arrivalAtPickup)}, needed by ${fmtTime(departureTime)})`
+                        );
+                    }
+                } catch (err) {
+                    addReasonAll(`Could not verify travel time from the previous trip: ${err.message}`);
+                }
+            }
+
+            let tripDurationMinutes = first.tripDurationMinutes;
+            let tripFreeAt = first.estimatedDropoff ? new Date(first.estimatedDropoff) : null;
+            if (tripDurationMinutes == null || !tripFreeAt) {
+                try {
+                    tripDurationMinutes = await getDriveDurationMinutes(cluster.puAddress, cluster.doAddress, departureTime);
+                    tripFreeAt = new Date(departureTime.getTime() + tripDurationMinutes * 60000);
+                    Reservation.updateOne(
+                        { _id: first._id },
+                        { $set: { tripDurationMinutes, estimatedDropoff: tripFreeAt } }
+                    ).catch(() => {});
+                } catch (err) {
+                    addReasonAll(`Could not calculate trip duration: ${err.message}`);
+                    tripFreeAt = null;
+                }
+            }
+
+            if (shift && tripFreeAt) {
+                const shiftEnd = toMinutes(shift.endTime);
+                const crossesMidnight = tripFreeAt.toDateString() !== puDateTime.toDateString();
+                const freeAtMinutes = tripFreeAt.getHours() * 60 + tripFreeAt.getMinutes();
+                if (!crossesMidnight && freeAtMinutes > shiftEnd) {
+                    addReasonAll(`Completing this trip runs past ${driverName}'s shift end (${shift.endTime})`);
+                }
+            }
+
+            for (const t of cluster.trips) {
+                const reasons = reasonsByTrip.get(t);
+                if (reasons.length > 0) conflicts.push({ trip: t, reasons });
+            }
+
+            lastDropoffAddress = cluster.doAddress;
+            freeAt = tripFreeAt || freeAt;
+        }
+    }
+
+    return conflicts;
+}

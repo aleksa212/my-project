@@ -268,6 +268,7 @@ export default function SelectedMenu({ selectedRows, setRowData, setSelectedRows
                 <option value="dispatched">Dispatched</option>
                 <option value="accepted">Accepted</option>
                 <option value="confirmed">Confirmed</option>
+                <option value="needs attention">Needs Attention</option>
             </select>
 
             <Select

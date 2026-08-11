@@ -194,6 +194,10 @@ export function Table({
                                 case "accepted": return { backgroundColor: "#facc15" };
                                 case "confirmed": return { backgroundColor: "#00bd19" };
                                 case "Unassigned": return { backgroundColor: "#f10a0a" };
+                                // Distinct dark red from "Unassigned"'s bright
+                                // red -- this means "was fine, then broke,"
+                                // not "never got a driver."
+                                case "needs attention": return { backgroundColor: "#7f1d1d", color: "#ffffff" };
                                 default: return null;
                             }
                         }}

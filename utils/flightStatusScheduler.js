@@ -1,6 +1,12 @@
 import { Reservation } from "../models/Reservation.js";
 import { airportTimeZones } from "./airports.js";
-import { getAirportArrivals, matchFlight, summarizeArrival } from "./flightAware.js";
+import {
+    getFlightByIdent,
+    getAirportArrivals,
+    matchFlight,
+    summarizeArrival,
+    localTimeToUtc
+} from "./flightAware.js";
 import { getFlightAwareUsage } from "./flightAwareUsage.js";
 
 const TERMINAL_STATUSES = ["Landed", "Cancelled"];
@@ -14,13 +20,138 @@ const TERMINAL_STATUSES = ["Landed", "Cancelled"];
 const LOOKBACK_DAYS = 2;
 const LOOKAHEAD_DAYS = 3;
 
+// Below this, a trip switches from its own per-flight lookup (one billed
+// query per trip) to riding along on its airport's shared arrivals-board
+// poll (one billed query covers every pending trip at that airport at
+// once). This is the whole cost lever at real volume -- per-flight
+// lookups scale with trip count, board polls scale with airport count.
+// 6h is comfortably inside AeroAPI's own window for a flight going
+// active/filed with ATC, so switching over this early rarely leaves a
+// gap where neither source has data yet.
+const NEAR_HORIZON_MINUTES = 6 * 60;
+
+// How often a still-far-out trip gets re-seeded via its own per-flight
+// lookup. Coarse on purpose: checking hourly (the old interval) for up to
+// 3 days out is exactly what made per-trip lookups too expensive to run
+// at hundreds-of-trips/day scale -- see the AeroAPI cost sizing this
+// replaced. Every 4h still catches a multi-hour delay well before it's
+// "too close" -- the failure mode this exists for is measured in hours,
+// not minutes.
+const FAR_CHECK_INTERVAL_MS = 4 * 60 * 60 * 1000;
+
+// Once inside NEAR_HORIZON_MINUTES, an airport's shared board is polled
+// on this same near/far urgency curve -- tightest right before pickup,
+// looser the further out the airport's nearest pending trip still is.
+const BOARD_TIERS = [
+    { withinMinutes: 30, intervalMs: 5 * 60 * 1000 },
+    { withinMinutes: 180, intervalMs: 15 * 60 * 1000 },
+    { withinMinutes: NEAR_HORIZON_MINUTES, intervalMs: 30 * 60 * 1000 }
+];
+
+function requiredBoardIntervalMs(minutesUntil) {
+    const distance = Math.abs(minutesUntil);
+    return (
+        BOARD_TIERS.find(t => distance <= t.withinMinutes)?.intervalMs ??
+        BOARD_TIERS[BOARD_TIERS.length - 1].intervalMs
+    );
+}
+
+// Best current estimate of the pickup instant, in preference order:
+// FLTactual (most current) > FLTscheduled > the trip's raw PUtime. All
+// three are "HH:MM" local-to-the-airport strings.
+function referenceTime(trip, timeZone) {
+    const timeStr = trip.FLTactual || trip.FLTscheduled || trip.PUtime;
+    const dateStr = new Date(trip.PUdate).toISOString().slice(0, 10);
+    return localTimeToUtc(dateStr, timeStr, timeZone);
+}
+
+// Airport-level "last polled" cadence lives in memory rather than the DB
+// -- it's shared across every trip at that airport, so there's no single
+// Reservation document to hang it off of. Losing it on a server restart
+// just means that airport's board gets polled once right away instead of
+// waiting out its interval, same as a trip with no flightLastCheckedAt.
+const airportLastCheckedAt = new Map();
+
+async function refreshFarTrip(trip, timeZone, now) {
+    const expectedDate = new Date(trip.PUdate).toISOString().slice(0, 10);
+    const flight = await getFlightByIdent(trip.FlightNumber, expectedDate, timeZone);
+    trip.flightLastCheckedAt = now;
+
+    let updated = false;
+    if (flight) {
+        const { FLTscheduled, FLTactual, FLTstatus } = summarizeArrival(flight, timeZone);
+        if (trip.FLTscheduled !== FLTscheduled || trip.FLTactual !== FLTactual || trip.FLTstatus !== FLTstatus) {
+            trip.FLTscheduled = FLTscheduled;
+            trip.FLTactual = FLTactual;
+            trip.FLTstatus = FLTstatus;
+            updated = true;
+        }
+    }
+    await trip.save();
+    return updated;
+}
+
+async function refreshAirportBoard(airportCode, nearTrips) {
+    let boardUpdated = 0;
+    let boardErrors = 0;
+
+    let arrivals;
+    try {
+        arrivals = await getAirportArrivals(airportCode);
+    } catch (err) {
+        console.error(`Arrivals board check failed for ${airportCode}:`, err.message);
+        return {
+            boardUpdated,
+            boardErrors: nearTrips.length,
+            capped: err.message.includes("monthly query cap reached")
+        };
+    }
+
+    for (const { trip, timeZone } of nearTrips) {
+        try {
+            const expectedDate = new Date(trip.PUdate).toISOString().slice(0, 10);
+            const flight = matchFlight(arrivals, trip.FlightNumber, { expectedDate, timeZone });
+            if (!flight) continue;
+
+            const { FLTscheduled, FLTactual, FLTstatus } = summarizeArrival(flight, timeZone);
+            if (trip.FLTscheduled !== FLTscheduled || trip.FLTactual !== FLTactual || trip.FLTstatus !== FLTstatus) {
+                trip.FLTscheduled = FLTscheduled;
+                trip.FLTactual = FLTactual;
+                trip.FLTstatus = FLTstatus;
+                await trip.save();
+                boardUpdated++;
+            }
+        } catch (err) {
+            boardErrors++;
+            console.error(
+                `Board match/save failed for trip #${trip.tripNumber ?? trip._id} (${trip.FlightNumber}):`,
+                err.message
+            );
+        }
+    }
+
+    return { boardUpdated, boardErrors, capped: false };
+}
+
 /**
- * Polls FlightAware for every airport that currently has at least one
- * pending (not yet Landed/Cancelled) airport-pickup reservation, and
- * updates FLTscheduled/FLTactual/FLTstatus for whatever matches. One
- * AeroAPI call per airport, not per trip -- an airport with nothing
- * pending right now costs nothing this cycle, and a trip stops being
- * polled the moment its flight lands or gets cancelled.
+ * Two-track polling, split at NEAR_HORIZON_MINUTES:
+ *
+ *  - Far out: one per-flight lookup per trip (its own billed query), on a
+ *    coarse interval -- the only way to see schedule data for a flight
+ *    that isn't active/filed with ATC yet, but expensive per trip, so
+ *    it's kept infrequent.
+ *  - Near: trips ride along on their airport's shared arrivals-board poll
+ *    -- one query updates every pending trip at that airport at once, so
+ *    cost scales with airport count, not trip count, right where the
+ *    volume actually is at real fleet size.
+ *
+ * The previous version used only the far-out (per-flight) path all the
+ * way from 3 days out, which is fine at a handful of trips/day but scales
+ * linearly with trip volume -- at a few hundred trips/day it turns into
+ * hundreds of thousands of billed queries/month. This split keeps the
+ * expensive path reserved for the one thing it's uniquely needed for
+ * (far-out schedule visibility), and moves everything else onto the
+ * cheap shared path.
  */
 export async function refreshPendingFlights() {
     const now = new Date();
@@ -33,70 +164,114 @@ export async function refreshPendingFlights() {
         PUdate: { $gte: windowStart, $lte: windowEnd }
     });
 
-    const byAirport = new Map();
+    const farDue = [];
+    const nearByAirport = new Map();
+
     for (const trip of candidates) {
-        const code = trip.PUlocationCode;
-        if (!airportTimeZones[code]) continue; // no timezone configured, skip safely
-        if (!byAirport.has(code)) byAirport.set(code, []);
-        byAirport.get(code).push(trip);
+        const timeZone = airportTimeZones[trip.PUlocationCode];
+        if (!timeZone) continue; // no timezone configured, skip safely
+
+        const ref = referenceTime(trip, timeZone);
+        const minutesUntil = (ref.getTime() - now.getTime()) / 60000;
+
+        if (Math.abs(minutesUntil) > NEAR_HORIZON_MINUTES) {
+            const dueAt = trip.flightLastCheckedAt
+                ? trip.flightLastCheckedAt.getTime() + FAR_CHECK_INTERVAL_MS
+                : 0;
+            if (now.getTime() >= dueAt) farDue.push({ trip, timeZone });
+            continue;
+        }
+
+        if (!nearByAirport.has(trip.PUlocationCode)) nearByAirport.set(trip.PUlocationCode, []);
+        nearByAirport.get(trip.PUlocationCode).push({ trip, timeZone, minutesUntil });
     }
 
-    let tripsUpdated = 0;
-    let airportErrors = 0;
-
-    for (const [airportCode, trips] of byAirport) {
+    let farChecked = 0, farUpdated = 0, farErrors = 0;
+    for (const { trip, timeZone } of farDue) {
+        farChecked++;
         try {
-            const arrivals = await getAirportArrivals(airportCode);
-            const timeZone = airportTimeZones[airportCode];
-
-            for (const trip of trips) {
-                const expectedDate = new Date(trip.PUdate).toISOString().slice(0, 10);
-                const flight = matchFlight(arrivals, trip.FlightNumber, { expectedDate, timeZone });
-                if (!flight) continue;
-
-                const { FLTscheduled, FLTactual, FLTstatus } = summarizeArrival(flight, timeZone);
-                if (
-                    trip.FLTscheduled === FLTscheduled &&
-                    trip.FLTactual === FLTactual &&
-                    trip.FLTstatus === FLTstatus
-                ) {
-                    continue; // nothing actually changed, skip the write
-                }
-
-                trip.FLTscheduled = FLTscheduled;
-                trip.FLTactual = FLTactual;
-                trip.FLTstatus = FLTstatus;
-                await trip.save();
-                tripsUpdated++;
-            }
+            if (await refreshFarTrip(trip, timeZone, now)) farUpdated++;
         } catch (err) {
-            airportErrors++;
-            console.error(`Flight status poll failed for "${airportCode}":`, err.message);
+            farErrors++;
+            console.error(
+                `Far-out flight check failed for trip #${trip.tripNumber ?? trip._id} (${trip.FlightNumber}):`,
+                err.message
+            );
+            // Stop this whole cycle once the cap is hit -- every
+            // remaining call would fail the same way.
+            if (err.message.includes("monthly query cap reached")) break;
         }
     }
 
-    return { airportsPolled: byAirport.size, tripsUpdated, airportErrors };
+    let boardsPolled = 0, nearUpdated = 0, nearErrors = 0;
+    for (const [airportCode, group] of nearByAirport) {
+        const nearestMinutes = Math.min(...group.map(g => Math.abs(g.minutesUntil)));
+        const interval = requiredBoardIntervalMs(nearestMinutes);
+        const lastChecked = airportLastCheckedAt.get(airportCode) ?? 0;
+        if (now.getTime() < lastChecked + interval) continue; // not due yet this cycle
+
+        boardsPolled++;
+        airportLastCheckedAt.set(airportCode, now.getTime());
+        const { boardUpdated, boardErrors, capped } = await refreshAirportBoard(airportCode, group);
+        nearUpdated += boardUpdated;
+        nearErrors += boardErrors;
+        if (capped) break;
+    }
+
+    const nearTripsSeen = [...nearByAirport.values()].reduce((sum, g) => sum + g.length, 0);
+
+    return {
+        farChecked,
+        farUpdated,
+        farErrors,
+        boardsPolled,
+        nearTripsSeen,
+        nearUpdated,
+        nearErrors,
+        candidateCount: candidates.length
+    };
 }
 
 /**
  * Starts the recurring background poll. Runs once immediately (so a
  * fresh server start doesn't wait a full interval before the grid has
- * current data), then every intervalMs after that.
+ * current data), then every intervalMs after that. intervalMs should be
+ * at or below the tightest tier above (5 min) so that tier can actually
+ * take effect -- a 10-minute tick can't honor a 5-minute tier.
  */
 export function startFlightStatusPolling(intervalMs) {
+    // A cycle touching many airports/far-out trips can run long (the rate
+    // limiter in flightAware.js throttles outgoing AeroAPI calls) --
+    // without this guard, a tick landing mid-run would start a second
+    // overlapping refreshPendingFlights(), doubling up on the same
+    // rate-limit budget and re-polling things the first run hasn't
+    // gotten to yet.
+    let running = false;
+
     const runAndLog = () => {
+        if (running) return;
+        running = true;
         refreshPendingFlights()
-            .then(async ({ airportsPolled, tripsUpdated, airportErrors }) => {
-                if (airportsPolled > 0 || tripsUpdated > 0) {
+            .then(async (stats) => {
+                const {
+                    farChecked, farUpdated, farErrors,
+                    boardsPolled, nearTripsSeen, nearUpdated, nearErrors,
+                    candidateCount
+                } = stats;
+
+                if (farChecked > 0 || boardsPolled > 0) {
                     const usage = await getFlightAwareUsage().catch(() => null);
                     console.log(
-                        `✈️  Flight status poll: ${airportsPolled} airport(s) checked, ${tripsUpdated} trip(s) updated` +
-                        (airportErrors ? `, ${airportErrors} airport(s) failed` : "") +
+                        `✈️  Flight status poll: ${candidateCount} pending trip(s) — ` +
+                        `${farChecked} far-out checked (${farUpdated} updated${farErrors ? `, ${farErrors} failed` : ""}), ` +
+                        `${boardsPolled} airport board(s) polled covering ${nearTripsSeen} near trip(s) ` +
+                        `(${nearUpdated} updated${nearErrors ? `, ${nearErrors} failed` : ""})` +
                         (usage ? ` — AeroAPI usage: ${usage.count}/${usage.limit} this month` : "")
                     );
                 }
             })
-            .catch(err => console.error("Flight status poll crashed:", err.message));
+            .catch(err => console.error("Flight status poll crashed:", err.message))
+            .finally(() => { running = false; });
     };
 
     runAndLog();

@@ -90,7 +90,7 @@ export function Table({
 
             const matchesId =
                 safeIdSearch === "" ||
-                String(row.tripNumber ?? "").includes(safeIdSearch);
+                String(row.tripNumber ?? "") === safeIdSearch;
 
             const matchesDate =
                 safeIdSearch !== "" ||
@@ -128,6 +128,10 @@ export function Table({
     };
 
     const handleCopyTrip = async (data) => {
+        const confirmCopy = window.confirm(
+            `Copy trip ID ${data.tripNumber ?? "?"}? This creates a new reservation with a fresh ID and the same details.`
+        );
+        if (!confirmCopy) return;
         await copyTrip(data);
     };
 
@@ -146,6 +150,10 @@ export function Table({
     };
 
     const handleAutoDispatchTrip = (data) => {
+        const confirmDispatch = window.confirm(
+            `Auto Dispatch trip ID ${data.tripNumber ?? "?"}? This will find and assign a driver for this trip.`
+        );
+        if (!confirmDispatch) return;
         setSingleDispatchTrip(data);
     };
 

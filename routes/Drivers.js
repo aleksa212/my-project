@@ -72,7 +72,7 @@ router.put("/:id", auth, async (req, res) => {
         const driver = await Driver.findByIdAndUpdate(
             req.params.id,
             updates,
-            { new: true, runValidators: true }
+            { returnDocument: "after", runValidators: true }
         );
 
         if (!driver) return res.status(404).json({ error: "Driver not found" });
@@ -126,7 +126,7 @@ router.put("/:id/day-override", auth, async (req, res) => {
                 startTime: startTime || "",
                 endTime: endTime || ""
             },
-            { new: true, upsert: true, runValidators: true }
+            { returnDocument: "after", upsert: true, runValidators: true }
         );
 
         res.json(override);
@@ -159,7 +159,7 @@ router.delete("/:id", auth, async (req, res) => {
         const driver = await Driver.findByIdAndUpdate(
             req.params.id,
             { active: false },
-            { new: true }
+            { returnDocument: "after" }
         );
         if (!driver) return res.status(404).json({ error: "Driver not found" });
         res.json(driver);

@@ -9,6 +9,32 @@ const BASE_URL = "https://aeroapi.flightaware.com/aeroapi";
 const normalizeIdent = (value) =>
     (value || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
 
+// AeroAPI's Personal tier caps at 10 result sets/minute -- separate from
+// (and much tighter than) the monthly dollar-based cap in
+// flightAwareUsage.js. That cap alone doesn't stop a burst of calls
+// within the same minute (confirmed live: 38 per-flight lookups fired
+// back-to-back by the tiered scheduler drew "User has reached quota
+// limit" from AeroAPI on most of them). This is a process-wide sliding
+// window shared by every AeroAPI call site so no combination of callers
+// can exceed it. 9, not 10, for a one-call safety margin.
+const RATE_LIMIT_PER_MINUTE = 9;
+const RATE_LIMIT_WINDOW_MS = 60 * 1000;
+let recentCallTimestamps = [];
+
+async function waitForRateLimitSlot() {
+    const now = Date.now();
+    recentCallTimestamps = recentCallTimestamps.filter(
+        (t) => now - t < RATE_LIMIT_WINDOW_MS
+    );
+    if (recentCallTimestamps.length >= RATE_LIMIT_PER_MINUTE) {
+        const oldest = recentCallTimestamps[0];
+        const waitMs = RATE_LIMIT_WINDOW_MS - (now - oldest) + 50;
+        await new Promise((resolve) => setTimeout(resolve, waitMs));
+        return waitForRateLimitSlot();
+    }
+    recentCallTimestamps.push(now);
+}
+
 /**
  * One call returns every flight arriving at the given airport within
  * AeroAPI's allowed window (recent past through ~2 days ahead — that's
@@ -38,6 +64,7 @@ export async function getAirportArrivals(airportCode, { maxPages = 3 } = {}) {
             );
         }
 
+        await waitForRateLimitSlot();
         const res = await fetch(next, { headers: { "x-apikey": FLIGHTAWARE_API_KEY } });
         if (!res.ok) {
             const body = await res.json().catch(() => ({}));
@@ -63,6 +90,86 @@ function localDateStr(isoString, timeZone) {
     }).formatToParts(d);
     const map = Object.fromEntries(parts.map(p => [p.type, p.value]));
     return `${map.year}-${map.month}-${map.day}`;
+}
+
+// The reverse of localDateStr/toLocalHHMM below: converts a local
+// wall-clock date+time in a given IANA time zone into the real UTC
+// instant it represents. No timezone library in this project, so this
+// uses the standard guess-then-correct trick (also used in
+// ColumnDefs.jsx's zonedTimeToUtc) — assume the wall-clock values ARE
+// UTC, see what that instant reads as when formatted back in the target
+// zone, then shift by the difference (which transparently handles DST).
+export function localTimeToUtc(dateStr, timeStr, timeZone) {
+    const [year, month, day] = dateStr.split("-").map(Number);
+    const [hour, minute] = timeStr.split(":").map(Number);
+    const utcGuess = Date.UTC(year, month - 1, day, hour, minute);
+
+    const dtf = new Intl.DateTimeFormat("en-US", {
+        timeZone, year: "numeric", month: "2-digit", day: "2-digit",
+        hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false
+    });
+    const parts = Object.fromEntries(dtf.formatToParts(new Date(utcGuess)).map(p => [p.type, p.value]));
+
+    const asIfUtc = Date.UTC(
+        Number(parts.year), Number(parts.month) - 1, Number(parts.day),
+        Number(parts.hour) % 24, Number(parts.minute), Number(parts.second)
+    );
+
+    return new Date(utcGuess + (utcGuess - asIfUtc));
+}
+
+/**
+ * Looks up ONE specific flight number for ONE specific local calendar
+ * day. Unlike getAirportArrivals (the airport-wide arrivals board, which
+ * only shows flights already active/filed with ATC), this pulls from
+ * AeroAPI's schedule data directly — it has the scheduled time even for
+ * a flight that's still hours from departing, which is what lets a
+ * trip's Flt Scheduled populate immediately instead of waiting for the
+ * flight to go active. Costs one query per call (vs. one per airport for
+ * the bulk board), which is why this is used sparingly — see the tiered
+ * polling in flightStatusScheduler.js.
+ */
+export async function getFlightByIdent(flightNumber, expectedDate, timeZone) {
+    if (!FLIGHTAWARE_API_KEY) {
+        throw new Error("FLIGHTAWARE_API_KEY is not configured");
+    }
+
+    const ident = normalizeIdent(flightNumber);
+    if (!ident) return null;
+
+    const usage = await tryConsumeFlightAwareQuery();
+    if (!usage.allowed) {
+        throw new Error(
+            `FlightAware monthly query cap reached (${usage.count}/${usage.limit}) — ` +
+            `staying in the free tier, no further AeroAPI calls this month`
+        );
+    }
+
+    const start = localTimeToUtc(expectedDate, "00:00", timeZone);
+    const end = new Date(start.getTime() + 24 * 60 * 60000);
+
+    const url = `${BASE_URL}/flights/${encodeURIComponent(ident)}` +
+        `?start=${encodeURIComponent(start.toISOString())}&end=${encodeURIComponent(end.toISOString())}`;
+
+    await waitForRateLimitSlot();
+    const res = await fetch(url, { headers: { "x-apikey": FLIGHTAWARE_API_KEY } });
+
+    if (!res.ok) {
+        if (res.status === 404) return null; // no such flight in that window -- not an error
+        const body = await res.json().catch(() => ({}));
+        throw new Error(`AeroAPI flight lookup failed for "${flightNumber}": ${body.detail || res.status}`);
+    }
+
+    const data = await res.json();
+    const flights = data.flights || [];
+
+    // Prefer the occurrence actually scheduled for the expected local
+    // date, in case the window's edges pulled in an adjacent day's flight.
+    return (
+        flights.find(f => f.scheduled_in && localDateStr(f.scheduled_in, timeZone) === expectedDate) ||
+        flights[0] ||
+        null
+    );
 }
 
 /**

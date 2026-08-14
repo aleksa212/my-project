@@ -21,11 +21,12 @@ connectDB();
 
 // Background flight-status polling — the grid always shows whatever was
 // last polled, so a page refresh costs zero extra AeroAPI calls no
-// matter how many dispatchers are looking at it. Only airports with an
-// actual pending (unlanded) airport-pickup trip get polled each cycle.
-// 10 min balances freshness against cost; tighten to 5 if the real
-// usage against your FlightAware plan has headroom for it.
-const FLIGHT_STATUS_POLL_INTERVAL_MS = 10 * 60 * 1000;
+// matter how many dispatchers are looking at it. Each trip's own tiered
+// interval (see flightStatusScheduler.js's TIERS) decides whether it's
+// actually due on a given tick, down to every 5 min for trips close to
+// their flight time — so this tick itself must be <= 5 min, or that
+// tightest tier could never actually fire on schedule.
+const FLIGHT_STATUS_POLL_INTERVAL_MS = 5 * 60 * 1000;
 startFlightStatusPolling(FLIGHT_STATUS_POLL_INTERVAL_MS);
 
 /* ==================== ROUTES ====================

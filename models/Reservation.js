@@ -40,6 +40,14 @@ const ReservationSchema = new mongoose.Schema({
     Driver: String,
     FLTstatus: String,
 
+    // When the FlightAware poller last actually checked this trip's
+    // flight — drives the tiered polling interval in
+    // utils/flightStatusScheduler.js (checked often close to the
+    // flight's time, infrequently far out) so a big schedule change
+    // hours out still gets caught promptly without polling everything
+    // at the same tight interval regardless of urgency.
+    flightLastCheckedAt: { type: Date, default: null },
+
     Area: String,
 
     PUlocation: { type: String, required: true },

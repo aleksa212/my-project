@@ -50,15 +50,21 @@ const actualDepartureTime = (trip, puDateTime) =>
         : puDateTime;
 
 /**
- * Replays already-assigned trips to reconstruct today's real schedule.
- * Takes driversForLookup/vehiclesByNumber as full (active + inactive)
- * lists — a trip dispatched to someone who's since quit, or a vehicle
- * that's since been taken out of service, still needs to resolve
- * correctly so today's already-committed schedule doesn't silently drop.
+ * Replays already-assigned trips to reconstruct today's real schedule as
+ * a per-driver timeline of "legs" (one per committed trip, kept in PU-time
+ * order) rather than a single collapsed end-of-day state. A new trip can
+ * then be checked against whichever two legs it would actually fall
+ * between — not just appended after the driver's last trip — so a big
+ * gap earlier in the day (e.g. a driver free from 8am to 1pm between two
+ * already-committed trips) is still usable. Takes driversForLookup/
+ * vehiclesByNumber as full (active + inactive) lists — a trip dispatched
+ * to someone who's since quit, or a vehicle that's since been taken out
+ * of service, still needs to resolve correctly so today's already-
+ * committed schedule doesn't silently drop.
  */
-async function buildStateFromFixedTrips(fixedTrips, driversForLookup, vehiclesByNumber) {
-    const driverState = new Map();
-    const vehicleHolder = new Map();
+async function buildDriverLegs(fixedTrips, driversForLookup, vehiclesByNumber) {
+    const legsByDriverId = new Map();
+    const vehicleOwner = new Map();
 
     const byDriverName = new Map();
     for (const t of fixedTrips) {
@@ -72,11 +78,7 @@ async function buildStateFromFixedTrips(fixedTrips, driversForLookup, vehiclesBy
         if (!driver) continue;
 
         driverTrips.sort((a, b) => toMinutes(a.PUtime) - toMinutes(b.PUtime));
-
-        let vehicle = null;
-        let lastDropoffAddress = null;
-        let freeAt = null;
-        let tripCount = 0;
+        const legs = [];
 
         for (const t of driverTrips) {
             const puAddress = resolveAddress(t.PUlocationCode, t.PUlocationName, t.PUlocation);
@@ -84,10 +86,10 @@ async function buildStateFromFixedTrips(fixedTrips, driversForLookup, vehiclesBy
             const puDateTime = combineDateTime(t.PUdate, t.PUtime);
             const departureTime = actualDepartureTime(t, puDateTime);
 
-            let tripFreeAt;
+            let freeAt;
 
             if (t.tripDurationMinutes != null && t.estimatedDropoff) {
-                tripFreeAt = new Date(t.estimatedDropoff);
+                freeAt = new Date(t.estimatedDropoff);
             } else {
                 let durationMinutes = 0;
                 try {
@@ -95,31 +97,42 @@ async function buildStateFromFixedTrips(fixedTrips, driversForLookup, vehiclesBy
                 } catch {
                     // best-effort reconstruction
                 }
-                tripFreeAt = new Date(departureTime.getTime() + durationMinutes * 60000);
+                freeAt = new Date(departureTime.getTime() + durationMinutes * 60000);
 
                 Reservation.updateOne(
                     { _id: t._id },
-                    { $set: { tripDurationMinutes: durationMinutes, estimatedDropoff: tripFreeAt } }
+                    { $set: { tripDurationMinutes: durationMinutes, estimatedDropoff: freeAt } }
                 ).catch(() => {});
             }
 
-            const tripVehicle = vehiclesByNumber.get(t.VEHnumber) || vehicle;
+            const vehicle = vehiclesByNumber.get(t.VEHnumber) || null;
+            if (vehicle) vehicleOwner.set(vehicle.id, driver.id);
 
-            if (tripVehicle && vehicle && tripVehicle.id !== vehicle.id) {
-                vehicleHolder.set(vehicle.id, null);
-            }
-            if (tripVehicle) vehicleHolder.set(tripVehicle.id, driver.id);
-
-            vehicle = tripVehicle || vehicle;
-            lastDropoffAddress = doAddress;
-            freeAt = tripFreeAt;
-            tripCount += 1;
+            legs.push({ tripId: String(t._id), departureTime, puAddress, doAddress, freeAt, vehicle });
         }
 
-        driverState.set(driver.id, { vehicle, lastDropoffAddress, freeAt, tripCount });
+        legsByDriverId.set(driver.id, legs);
     }
 
-    return { driverState, vehicleHolder };
+    return { legsByDriverId, vehicleOwner };
+}
+
+// legs must be kept sorted ascending by departureTime -- prev is the
+// latest leg at/before referenceTime, next is the earliest leg after it.
+function findNeighborLegs(legs, referenceTime) {
+    let prev = null;
+    let next = null;
+    for (const leg of legs) {
+        if (leg.departureTime.getTime() <= referenceTime.getTime()) prev = leg;
+        else { next = leg; break; }
+    }
+    return { prev, next };
+}
+
+function insertLegSorted(legs, leg) {
+    let i = legs.length;
+    while (i > 0 && legs[i - 1].departureTime.getTime() > leg.departureTime.getTime()) i--;
+    legs.splice(i, 0, leg);
 }
 
 export async function runAutoDispatch(airportCode, dateStr, options = {}) {
@@ -172,22 +185,21 @@ export async function runAutoDispatch(airportCode, dateStr, options = {}) {
             return shift ? { driver: d, shift } : null;
         })
         .filter(Boolean);
-    const shiftByDriverId = new Map(eligibleDrivers.map(d => [d.driver.id, d.shift]));
-
     const vehiclesByCapacity = [...activeVehicles].sort((a, b) => a.capacity - b.capacity);
 
-    const { driverState: fixedDriverState, vehicleHolder: fixedVehicleHolder } =
-        await buildStateFromFixedTrips(fixedTrips, allDriversAtAirport, vehiclesByNumberAll);
+    const { legsByDriverId, vehicleOwner } = await buildDriverLegs(fixedTrips, allDriversAtAirport, vehiclesByNumberAll);
+    for (const { driver } of eligibleDrivers) {
+        if (!legsByDriverId.has(driver.id)) legsByDriverId.set(driver.id, []);
+    }
 
-    const vehicleHolder = new Map(activeVehicles.map(v => [v.id, null]));
-    for (const [vId, driverId] of fixedVehicleHolder) vehicleHolder.set(vId, driverId);
-
-    const driverState = new Map(
-        eligibleDrivers.map(d => [
-            d.driver.id,
-            fixedDriverState.get(d.driver.id) || { vehicle: null, lastDropoffAddress: null, freeAt: null, tripCount: 0 }
-        ])
-    );
+    // Whole-day vehicle ownership: once a vehicle shows up on any of a
+    // driver's committed legs, it's theirs for the rest of the day (with
+    // the single exception below -- a switch late in the day when the gap
+    // is big enough). Only used to keep a brand-new driver/vehicle pairing
+    // or an end-of-day switch from grabbing a vehicle someone else is
+    // already using; gap-fill candidates reuse a vehicle the driver
+    // already owns, so they never need to consult this.
+    const vehicleHolder = new Map(activeVehicles.map(v => [v.id, vehicleOwner.get(v.id) ?? null]));
 
     const assigned = [];
     const unassigned = [];
@@ -200,55 +212,108 @@ export async function runAutoDispatch(airportCode, dateStr, options = {}) {
         const departureTime = actualDepartureTime(trip, puDateTime);
         const puMinutes = toMinutes(trip.PUtime);
 
+        // The trip's own duration doesn't depend on which driver takes
+        // it, so it's computed once up front -- both to use below and so
+        // gap-fill candidates can check the leg AFTER this trip too, not
+        // just the one before it.
+        let tripDurationMinutes;
+        try {
+            tripDurationMinutes = await getDriveDurationMinutes(puAddress, doAddress, departureTime);
+        } catch (err) {
+            unassigned.push({
+                trip,
+                reason: `Could not calculate trip duration: ${err.message}`,
+                reasonCode: "DURATION_ERROR"
+            });
+            continue;
+        }
+        const freeAt = new Date(departureTime.getTime() + tripDurationMinutes * 60000);
+
         const candidates = [];
 
         for (const { driver, shift } of eligibleDrivers) {
             const shiftStart = toMinutes(shift.startTime);
             const shiftEnd = toMinutes(shift.endTime);
-            if (puMinutes < shiftStart || puMinutes > shiftEnd) continue;
+            // Eligibility is about the PICKUP falling inside the shift, not
+            // about the drop-off finishing before it ends -- a driver who
+            // works until 17:00 can still take a pickup at 16:59 even
+            // though the job itself runs past 17:00, same as a real
+            // dispatcher would allow. Upper bound is exclusive (17:00
+            // itself is past their shift, 16:59 is the latest).
+            if (puMinutes < shiftStart || puMinutes >= shiftEnd) continue;
 
-            const state = driverState.get(driver.id);
+            const legs = legsByDriverId.get(driver.id);
+            const { prev, next } = findNeighborLegs(legs, departureTime);
 
-            if (!state.vehicle) {
+            if (next) {
+                // Slotting in before a trip the driver already has later
+                // today (with or without an earlier trip too). Only safe
+                // with the vehicle already on both sides of the gap -- if
+                // there's already a scheduled switch between prev and
+                // next, this gap belongs to that transition, not to a
+                // brand-new trip.
+                if (prev && (!prev.vehicle || !next.vehicle || prev.vehicle.id !== next.vehicle.id)) continue;
+                const vehicle = prev ? prev.vehicle : next.vehicle;
+                if (!vehicle || vehicle.capacity < pax) continue;
+
+                if (prev) {
+                    let deadIn;
+                    try {
+                        deadIn = await getDriveDurationMinutes(prev.doAddress, puAddress, prev.freeAt);
+                    } catch { continue; }
+                    const arrivalAtPickup = new Date(prev.freeAt.getTime() + (deadIn + BUFFER_MINUTES) * 60000);
+                    if (arrivalAtPickup > departureTime) continue;
+                }
+
+                let deadOut;
+                try {
+                    deadOut = await getDriveDurationMinutes(doAddress, next.puAddress, freeAt);
+                } catch { continue; }
+                const arrivalAtNext = new Date(freeAt.getTime() + (deadOut + BUFFER_MINUTES) * 60000);
+                if (arrivalAtNext > next.departureTime) continue;
+
+                candidates.push({ driver, vehicle, deadheadMinutes: 0, switched: false, gapInsert: true });
+                continue;
+            }
+
+            if (!prev) {
+                // No trips at all yet today -- pick any unclaimed vehicle.
                 const vehicle = vehiclesByCapacity.find(
                     v => v.capacity >= pax && vehicleHolder.get(v.id) == null
                 );
                 if (!vehicle) continue;
-                candidates.push({ driver, vehicle, deadheadMinutes: 0, switched: false });
+                candidates.push({ driver, vehicle, deadheadMinutes: 0, switched: false, gapInsert: false });
                 continue;
             }
 
+            // Appending after the driver's current last trip of the day.
             let deadheadMinutes;
             try {
-                deadheadMinutes = await getDriveDurationMinutes(
-                    state.lastDropoffAddress,
-                    puAddress,
-                    state.freeAt
-                );
+                deadheadMinutes = await getDriveDurationMinutes(prev.doAddress, puAddress, prev.freeAt);
             } catch {
                 continue;
             }
 
             const arrivalAtPickup = new Date(
-                state.freeAt.getTime() + (deadheadMinutes + BUFFER_MINUTES) * 60000
+                prev.freeAt.getTime() + (deadheadMinutes + BUFFER_MINUTES) * 60000
             );
             if (arrivalAtPickup > departureTime) continue;
 
-            const gapMinutes = (departureTime.getTime() - state.freeAt.getTime()) / 60000;
+            const gapMinutes = (departureTime.getTime() - prev.freeAt.getTime()) / 60000;
             const canSwitchVehicle = gapMinutes >= SWITCH_GAP_MINUTES;
 
-            if (state.vehicle.capacity >= pax) {
-                candidates.push({ driver, vehicle: state.vehicle, deadheadMinutes, switched: false });
+            if (prev.vehicle && prev.vehicle.capacity >= pax) {
+                candidates.push({ driver, vehicle: prev.vehicle, deadheadMinutes, switched: false, gapInsert: false });
             }
 
             if (canSwitchVehicle) {
                 const altVehicle = vehiclesByCapacity.find(
-                    v => v.id !== state.vehicle.id &&
+                    v => (!prev.vehicle || v.id !== prev.vehicle.id) &&
                          v.capacity >= pax &&
                          vehicleHolder.get(v.id) == null
                 );
                 if (altVehicle) {
-                    candidates.push({ driver, vehicle: altVehicle, deadheadMinutes, switched: true });
+                    candidates.push({ driver, vehicle: altVehicle, deadheadMinutes, switched: true, gapInsert: false });
                 }
             }
         }
@@ -262,59 +327,37 @@ export async function runAutoDispatch(airportCode, dateStr, options = {}) {
             continue;
         }
 
+        // Prefer filling an existing gap over appending/switching -- it
+        // uses a driver who's already idle mid-day instead of stretching
+        // someone else's day further out. Within that, fairest trip
+        // count, then closest deadhead.
         candidates.sort((a, b) => {
-            const countA = driverState.get(a.driver.id).tripCount;
-            const countB = driverState.get(b.driver.id).tripCount;
+            if (a.gapInsert !== b.gapInsert) return a.gapInsert ? -1 : 1;
+            const countA = legsByDriverId.get(a.driver.id).length;
+            const countB = legsByDriverId.get(b.driver.id).length;
             if (countA !== countB) return countA - countB;
             if (a.switched !== b.switched) return a.switched ? 1 : -1;
             return a.deadheadMinutes - b.deadheadMinutes;
         });
 
-        let tripDurationMinutes;
-        try {
-            tripDurationMinutes = await getDriveDurationMinutes(puAddress, doAddress, departureTime);
-        } catch (err) {
-            unassigned.push({
-                trip,
-                reason: `Could not calculate trip duration: ${err.message}`,
-                reasonCode: "DURATION_ERROR"
-            });
-            continue;
+        const chosen = candidates[0];
+
+        if (!chosen.gapInsert) {
+            const legs = legsByDriverId.get(chosen.driver.id);
+            const priorVehicle = legs[legs.length - 1]?.vehicle;
+            if (chosen.switched && priorVehicle) {
+                vehicleHolder.set(priorVehicle.id, null);
+            }
+            vehicleHolder.set(chosen.vehicle.id, chosen.driver.id);
         }
 
-        const freeAt = new Date(departureTime.getTime() + tripDurationMinutes * 60000);
-        const crossesMidnight = freeAt.toDateString() !== puDateTime.toDateString();
-        const freeAtMinutes = freeAt.getHours() * 60 + freeAt.getMinutes();
-
-        let chosen = null;
-        for (const c of candidates) {
-            const shiftEnd = toMinutes(shiftByDriverId.get(c.driver.id).endTime);
-            if (!crossesMidnight && freeAtMinutes > shiftEnd) continue;
-            chosen = c;
-            break;
-        }
-
-        if (!chosen) {
-            unassigned.push({
-                trip,
-                reason: "Completing this trip would run past every eligible driver's scheduled shift end",
-                reasonCode: "SHIFT_OVERRUN"
-            });
-            continue;
-        }
-
-        const state = driverState.get(chosen.driver.id);
-
-        if (chosen.switched && state.vehicle) {
-            vehicleHolder.set(state.vehicle.id, null);
-        }
-        vehicleHolder.set(chosen.vehicle.id, chosen.driver.id);
-
-        driverState.set(chosen.driver.id, {
-            vehicle: chosen.vehicle,
-            lastDropoffAddress: doAddress,
+        insertLegSorted(legsByDriverId.get(chosen.driver.id), {
+            tripId: String(trip._id),
+            departureTime,
+            puAddress,
+            doAddress,
             freeAt,
-            tripCount: state.tripCount + 1
+            vehicle: chosen.vehicle
         });
 
         assigned.push({
@@ -538,7 +581,10 @@ export async function findScheduleConflicts(airportCode, dateStr) {
                 const shiftStart = toMinutes(shift.startTime);
                 const shiftEnd = toMinutes(shift.endTime);
                 const puMinutes = toMinutes(first.PUtime);
-                if (puMinutes < shiftStart || puMinutes > shiftEnd) {
+                // Same exclusive-upper-bound rule as runAutoDispatch: the
+                // pickup must fall inside the shift, but the driver can
+                // still finish the job after shift end.
+                if (puMinutes < shiftStart || puMinutes >= shiftEnd) {
                     addReasonAll(`Pickup ${first.PUtime} is outside ${driverName}'s shift (${shift.startTime}-${shift.endTime})`);
                 }
             }
@@ -583,15 +629,6 @@ export async function findScheduleConflicts(airportCode, dateStr) {
                 } catch (err) {
                     addReasonAll(`Could not calculate trip duration: ${err.message}`);
                     tripFreeAt = null;
-                }
-            }
-
-            if (shift && tripFreeAt) {
-                const shiftEnd = toMinutes(shift.endTime);
-                const crossesMidnight = tripFreeAt.toDateString() !== puDateTime.toDateString();
-                const freeAtMinutes = tripFreeAt.getHours() * 60 + tripFreeAt.getMinutes();
-                if (!crossesMidnight && freeAtMinutes > shiftEnd) {
-                    addReasonAll(`Completing this trip runs past ${driverName}'s shift end (${shift.endTime})`);
                 }
             }
 

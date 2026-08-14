@@ -65,7 +65,7 @@ router.delete("/:id", auth, async (req, res) => {
         const vehicle = await Vehicle.findByIdAndUpdate(
             req.params.id,
             { active: false },
-            { new: true }
+            { returnDocument: "after" }
         );
         if (!vehicle) return res.status(404).json({ error: "Vehicle not found" });
         res.json(vehicle);

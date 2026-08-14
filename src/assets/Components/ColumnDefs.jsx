@@ -64,14 +64,6 @@ export const columnDefs = [
         headerClass: "checkbox-center"
     },
 
-    {
-        field: "tripNumber",
-        headerName: "ID",
-        maxWidth: 70,
-        pinned: "left",
-        valueFormatter: (p) => (p.value != null ? String(p.value) : "")
-    },
-
     { field: "Status", headerName: "Status" },
 
     {

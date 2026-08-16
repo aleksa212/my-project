@@ -9,7 +9,7 @@ export default function ReservationContextMenu({
     onNotes,
     onLogs,
     onAutoDispatch,
-    onCancel
+    onRemove
 }) {
     const menuRef = useRef(null);
 
@@ -69,12 +69,17 @@ export default function ReservationContextMenu({
                 </div>
             )}
 
-            {onCancel && (
+            {/* Deletes the reservation outright (see useReservations.jsx's
+                removeTrip) -- distinct from setting Status: "Cancelled",
+                which keeps it visible in the grid. Anyone with grid
+                access can do this for now; the plan is to restrict it to
+                specific permitted accounts later on. */}
+            {onRemove && (
                 <div
                     className="p-2 hover:bg-red-100 text-red-700 cursor-pointer border-t"
-                    onClick={async () => { await onCancel(contextMenu.data); onClose(); }}
+                    onClick={async () => { await onRemove(contextMenu.data); onClose(); }}
                 >
-                    Cancel Reservation
+                    Remove Reservation
                 </div>
             )}
         </div>

@@ -1,10 +1,10 @@
-import { useState, useMemo } from "react";
+import { useState } from "react";
 import { AgGridReact } from "ag-grid-react";
 import { AllCommunityModule } from "ag-grid-community";
 import { AgGridProvider } from "ag-grid-react";
 
 import { useReservations } from "./useReservations";
-import { resolveLocation, normalizeToCode } from "./Airports";
+import { resolveLocation } from "./Airports";
 import SelectedMenu from "./SelectedMenu";
 import { columnDefs } from "./ColumnDefs";
 import ReservationContextMenu from "./ReservationContextMenu";
@@ -13,6 +13,7 @@ import DispatchLogsModal from "./DispatchLogsModal";
 import AutoDispatchModal from "./AutoDispatchModal";
 
 const modules = [AllCommunityModule];
+const PAGE_SIZE = 100;
 
 export function Table({
     searchText,
@@ -26,13 +27,46 @@ export function Table({
     setAirportFilter
 }) {
 
+    const safeSearchText = searchText ?? "";
+    const safeIdSearch = idSearch ?? "";
+    const safeSelectedDate = selectedDate ?? "";
+    const safeAirportFilter = airportFilter ?? [];
+    const airportFilterKey = safeAirportFilter.join(",");
+
+    // Filtering/searching happens server-side now (see routes/
+    // reservations.js), so any change to the search terms invalidates
+    // whatever page you were on -- page 5 of an old, broader result set
+    // isn't a meaningful place to land in a new, narrower one. Reset
+    // during render (React's documented pattern for "adjusting state
+    // when a prop changes") rather than in an effect, which would cost
+    // an extra render-then-effect-then-rerender round trip for the exact
+    // same outcome.
+    const filterKey = `${safeSearchText}|${safeIdSearch}|${safeSelectedDate}|${airportFilterKey}`;
+    const [page, setPage] = useState(1);
+    const [lastFilterKey, setLastFilterKey] = useState(filterKey);
+    if (filterKey !== lastFilterKey) {
+        setLastFilterKey(filterKey);
+        setPage(1);
+    }
+
     const {
         rowData,
         setRowData,
+        total,
+        totalPages,
+        loading,
         copyTrip,
         updateDispatchNotes,
-        cancelTrip
-    } = useReservations(refreshKey);
+        removeTrip
+    } = useReservations({
+        refreshKey,
+        page,
+        limit: PAGE_SIZE,
+        searchText: safeSearchText,
+        idSearch: safeIdSearch,
+        selectedDate: safeSelectedDate,
+        airportFilter: safeAirportFilter
+    });
 
     const [gridApi, setGridApi] = useState(null);
     const [selectedRows, setSelectedRows] = useState([]);
@@ -41,65 +75,6 @@ export function Table({
     const [logsViewer, setLogsViewer] = useState(null);
     const [selectedIds, setSelectedIds] = useState(new Set());
     const [singleDispatchTrip, setSingleDispatchTrip] = useState(null);
-
-    const safeSearchText = searchText ?? "";
-    const safeIdSearch = idSearch ?? "";
-    const safeSelectedDate = selectedDate ?? "";
-
-    const filteredData = useMemo(() => {
-        const matchesAirportFilter = (row) => {
-            if (!airportFilter || airportFilter.length === 0) return true;
-            const puCode = row.PUlocationCode || normalizeToCode(row.PUlocationCode) || null;
-            const doCode = row.DOlocationCode || normalizeToCode(row.DOlocationCode) || null;
-            return (
-                (puCode && airportFilter.includes(puCode)) ||
-                (doCode && airportFilter.includes(doCode))
-            );
-        };
-
-        const normalizeDate = (dateStr) => {
-            if (!dateStr) return "";
-            const d = new Date(dateStr);
-            if (isNaN(d.getTime())) return "";
-            return d.toISOString().slice(0, 10);
-        };
-
-        return rowData.filter((row) => {
-            const searchBlob = [
-                row.Status,
-                row.PUdate,
-                row.PUtime,
-                row.PUlocation,
-                row.PUlocationCode,
-                row.DOlocation,
-                row.DOlocationCode,
-                row.FlightNumber,
-                row.FLTscheduled,
-                row.FLTactual,
-                row.FLTstatus,
-                row.VEHtype,
-                row.VEHnumber,
-                row.Driver,
-                row.PAX,
-                row.TripInfo,
-            ].filter(Boolean).join(" ").toLowerCase();
-
-            const matchesText =
-                safeSearchText === "" ||
-                searchBlob.includes(safeSearchText.toLowerCase());
-
-            const matchesId =
-                safeIdSearch === "" ||
-                String(row.tripNumber ?? "") === safeIdSearch;
-
-            const matchesDate =
-                safeIdSearch !== "" ||
-                safeSelectedDate === "" ||
-                normalizeDate(row.PUdate) === safeSelectedDate;
-
-            return matchesText && matchesId && matchesDate && matchesAirportFilter(row);
-        });
-    }, [rowData, safeSearchText, safeIdSearch, safeSelectedDate, airportFilter]);
 
     const onGridReady = (params) => {
         setGridApi(params.api);
@@ -157,12 +132,12 @@ export function Table({
         setSingleDispatchTrip(data);
     };
 
-    const handleCancelReservation = async (data) => {
-        const confirmCancel = window.confirm(
-            `Cancel trip ID ${data.tripNumber ?? "?"}? This can't be undone — its ID goes back into the pool for the next new reservation.`
+    const handleRemoveReservation = async (data) => {
+        const confirmRemove = window.confirm(
+            `Remove trip ID ${data.tripNumber ?? "?"}? This can't be undone — its ID goes back into the pool for the next new reservation. If you just want to mark it cancelled and keep it visible, use the Cancelled status instead.`
         );
-        if (!confirmCancel) return;
-        await cancelTrip(data);
+        if (!confirmRemove) return;
+        await removeTrip(data);
     };
 
     return (
@@ -175,7 +150,7 @@ export function Table({
             >
                 <div className="flex-1 min-h-0 min-w-0 w-full">
                     <AgGridReact
-                        rowData={filteredData}
+                        rowData={rowData}
                         columnDefs={columnDefs}
                         rowClassRules={{
                             "row-dim": (params) => {
@@ -202,10 +177,32 @@ export function Table({
                                 case "accepted": return { backgroundColor: "#facc15" };
                                 case "confirmed": return { backgroundColor: "#00bd19" };
                                 case "Unassigned": return { backgroundColor: "#f10a0a" };
+                                // Out for driver self-accept (see
+                                // utils/tripOfferEngine.js) -- distinct
+                                // from plain "Unassigned" so it's obvious
+                                // at a glance this one's already actively
+                                // being worked, not just sitting there.
+                                case "Bidding": return { backgroundColor: "#9333ea", color: "#ffffff" };
+                                // Covered by Uber, not the in-house fleet
+                                // -- two shades of brown so "still needs
+                                // to be ordered" and "already on the way"
+                                // read differently at a glance.
+                                case "Order Uber": return { backgroundColor: "#C19A6B" };
+                                case "Uber OTW": return { backgroundColor: "#6F4E37", color: "#ffffff" };
                                 // Distinct dark red from "Unassigned"'s bright
                                 // red -- this means "was fine, then broke,"
                                 // not "never got a driver."
                                 case "needs attention": return { backgroundColor: "#7f1d1d", color: "#ffffff" };
+                                // En-route progression, in the order a
+                                // trip normally moves through them.
+                                case "Crew called": return { backgroundColor: "#93C5FD" };
+                                case "On the way": return { backgroundColor: "#C8A2C8" };
+                                case "Arrived": return { backgroundColor: "#F97316", color: "#ffffff" };
+                                // Terminal outcomes -- greyscale, darkest
+                                // for the most final/least-recoverable one.
+                                case "No show": return { backgroundColor: "#F3F4F6" };
+                                case "Done": return { backgroundColor: "#D1D5DB" };
+                                case "Cancelled": return { backgroundColor: "#6B7280", color: "#ffffff" };
                                 default: return null;
                             }
                         }}
@@ -222,6 +219,34 @@ export function Table({
                     />
                 </div>
 
+                <div className="flex items-center justify-between gap-2 px-1 py-2 text-sm text-gray-600 shrink-0">
+                    <span>
+                        {loading
+                            ? "Loading…"
+                            : total === 0
+                                ? "No trips"
+                                : `Showing ${(page - 1) * PAGE_SIZE + 1}–${Math.min(page * PAGE_SIZE, total)} of ${total}`}
+                    </span>
+
+                    <div className="flex items-center gap-2">
+                        <button
+                            className="px-2 py-1 border rounded disabled:opacity-40 disabled:cursor-not-allowed hover:bg-gray-100"
+                            onClick={() => setPage(p => Math.max(1, p - 1))}
+                            disabled={page <= 1}
+                        >
+                            Prev
+                        </button>
+                        <span>Page {page} of {totalPages}</span>
+                        <button
+                            className="px-2 py-1 border rounded disabled:opacity-40 disabled:cursor-not-allowed hover:bg-gray-100"
+                            onClick={() => setPage(p => Math.min(totalPages, p + 1))}
+                            disabled={page >= totalPages}
+                        >
+                            Next
+                        </button>
+                    </div>
+                </div>
+
                 <ReservationContextMenu
                     contextMenu={contextMenu}
                     onClose={() => setContextMenu(null)}
@@ -231,7 +256,7 @@ export function Table({
                     onNotes={handleOpenNotes}
                     onLogs={handleOpenLogs}
                     onAutoDispatch={handleAutoDispatchTrip}
-                    onCancel={handleCancelReservation}
+                    onRemove={handleRemoveReservation}
                 />
 
                 <SelectedMenu

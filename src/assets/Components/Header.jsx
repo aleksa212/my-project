@@ -4,6 +4,7 @@ import DriversModal from "./DriversModal";
 import VehiclesModal from "./VehiclesModal";
 import AutoDispatchModal from "./AutoDispatchModal";
 import CheckConflictsModal from "./CheckConflictsModal";
+import ScheduleModal from "./ScheduleModal";
 
 export function Header({
     searchText,
@@ -28,6 +29,7 @@ export function Header({
     const [vehiclesOpen, setVehiclesOpen] = useState(false);
     const [autoDispatchOpen, setAutoDispatchOpen] = useState(false);
     const [checkConflictsOpen, setCheckConflictsOpen] = useState(false);
+    const [scheduleOpen, setScheduleOpen] = useState(false);
 
     const airports = Object.keys(airportMap);
 
@@ -181,6 +183,13 @@ export function Header({
                 Check for Conflicts
             </button>
 
+            <button
+                className="p-1 rounded-sm border-0 bg-slate-600 hover:shadow-xl hover:bg-slate-700 text-white"
+                onClick={() => setScheduleOpen(true)}
+            >
+                Schedule
+            </button>
+
             <div className="flex gap-2 flex-wrap w-full mt-2">
                 {airportFilter.map(code => (
                     <span
@@ -274,6 +283,10 @@ export function Header({
                     onClose={() => setCheckConflictsOpen(false)}
                     onFlagged={() => setRefreshKey(prev => prev + 1)}
                 />
+            )}
+
+            {scheduleOpen && (
+                <ScheduleModal onClose={() => setScheduleOpen(false)} />
             )}
         </div>
     );

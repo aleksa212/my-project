@@ -136,7 +136,15 @@ function insertLegSorted(legs, leg) {
 }
 
 export async function runAutoDispatch(airportCode, dateStr, options = {}) {
-    const { tripIds = null } = options;
+    // mode: "assign" (default) picks and commits one driver+vehicle per
+    // trip, same as always. mode: "candidates" is read-only -- for each
+    // trip it reports every feasible driver+vehicle pairing instead of
+    // picking a winner, and never mutates driver/vehicle state. Built for
+    // the trip-offer engine (utils/tripOfferEngine.js): a trip going into
+    // "offer" mode needs the same feasibility rules Auto Dispatch itself
+    // uses, applied to every eligible driver at once rather than
+    // auto-assigning the single best one.
+    const { tripIds = null, mode = "assign" } = options;
     // Same UTC-vs-local reasoning as combineDateTime above.
     const dayOfWeek = DAY_NAMES[new Date(dateStr).getUTCDay()];
 
@@ -159,7 +167,12 @@ export async function runAutoDispatch(airportCode, dateStr, options = {}) {
     const tripsForDate = allTripsToday.filter(t => sameDate(t.PUdate, dateStr));
     const fixedTrips = tripsForDate.filter(t => t.Status !== "Unassigned" && t.Driver);
 
-    let trips = tripsForDate.filter(t => t.Status === "Unassigned");
+    // "Bidding" trips (out for driver self-accept, see
+    // utils/tripOfferEngine.js) have no Driver yet, so they're excluded
+    // from fixedTrips above the same as Unassigned ones -- but they ARE
+    // still eligible for a dispatcher-run Auto Dispatch pass to pick up
+    // manually, e.g. if a bid has stalled and nobody's accepted yet.
+    let trips = tripsForDate.filter(t => t.Status === "Unassigned" || t.Status === "Bidding");
     if (tripIds) {
         const idSet = new Set(tripIds.map(String));
         trips = trips.filter(t => idSet.has(String(t._id)));
@@ -203,6 +216,7 @@ export async function runAutoDispatch(airportCode, dateStr, options = {}) {
 
     const assigned = [];
     const unassigned = [];
+    const candidatesByTrip = [];
 
     for (const trip of trips) {
         const puAddress = resolveAddress(trip.PUlocationCode, trip.PUlocationName, trip.PUlocation);
@@ -316,6 +330,37 @@ export async function runAutoDispatch(airportCode, dateStr, options = {}) {
                     candidates.push({ driver, vehicle: altVehicle, deadheadMinutes, switched: true, gapInsert: false });
                 }
             }
+        }
+
+        if (mode === "candidates") {
+            // Read-only: report every feasible driver's best option
+            // rather than picking one. A driver can show up more than
+            // once in `candidates` (e.g. their own vehicle AND a switch
+            // option) -- only their best pairing is worth offering, same
+            // preference order (gap-fill first, then closest deadhead)
+            // as the real picker below uses.
+            const bestByDriver = new Map();
+            for (const c of candidates) {
+                const existing = bestByDriver.get(c.driver.id);
+                if (!existing) {
+                    bestByDriver.set(c.driver.id, c);
+                } else if (c.gapInsert !== existing.gapInsert) {
+                    if (c.gapInsert) bestByDriver.set(c.driver.id, c);
+                } else if (c.deadheadMinutes < existing.deadheadMinutes) {
+                    bestByDriver.set(c.driver.id, c);
+                }
+            }
+
+            candidatesByTrip.push({
+                trip,
+                candidates: [...bestByDriver.values()].map(c => ({
+                    driverId: c.driver.id,
+                    driverName: c.driver.displayName,
+                    vehicleId: c.vehicle.id,
+                    vehicleNumber: c.vehicle.vehicleNumber
+                }))
+            });
+            continue;
         }
 
         if (candidates.length === 0) {
@@ -477,7 +522,10 @@ export async function runAutoDispatch(airportCode, dateStr, options = {}) {
     unassigned.length = 0;
     unassigned.push(...stillUnassigned);
 
-    return { assigned, unassigned };
+    // candidates mode never pushes into assigned/unassigned (it `continue`s
+    // past both), so the double-pickup pass above is a harmless no-op for
+    // it -- candidatesByTrip is the only meaningful result in that mode.
+    return mode === "candidates" ? { candidatesByTrip } : { assigned, unassigned };
 }
 
 const fmtTime = (date) =>

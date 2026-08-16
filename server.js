@@ -10,7 +10,9 @@ import filterRoutes from "./routes/filters.js";
 import driverRoutes from "./routes/Drivers.js";
 import dispatchRoutes from "./routes/dispatchRoutes.js";
 import vehicleRoutes from "./routes/vehicles.js";
+import tripOfferRoutes from "./routes/tripOffers.js";
 import { startFlightStatusPolling } from "./utils/flightStatusScheduler.js";
+import { startTripOfferPolling } from "./utils/tripOfferEngine.js";
 
 const app = express();
 
@@ -29,6 +31,16 @@ connectDB();
 const FLIGHT_STATUS_POLL_INTERVAL_MS = 5 * 60 * 1000;
 startFlightStatusPolling(FLIGHT_STATUS_POLL_INTERVAL_MS);
 
+// Trip-offer polling — finds Unassigned trips as they cross into the 1h-
+// before-pickup window and offers them to eligible drivers (see
+// utils/tripOfferEngine.js). No driver app exists yet to actually receive
+// these, but the backend half works standalone -- routes/tripOffers.js is
+// what that app will call once it exists. Pure DB + candidate-lookup
+// work (no external API rate limit to respect here, unlike flight
+// polling), so this can run on its own cadence.
+const TRIP_OFFER_POLL_INTERVAL_MS = 5 * 60 * 1000;
+startTripOfferPolling(TRIP_OFFER_POLL_INTERVAL_MS);
+
 /* ==================== ROUTES ====================
    Mount points preserve the exact same URLs the
    frontend already calls — no frontend changes
@@ -40,6 +52,8 @@ startFlightStatusPolling(FLIGHT_STATUS_POLL_INTERVAL_MS);
      /drivers                   -> driverRoutes
      /dispatch/preview,
      /dispatch/commit           -> dispatchRoutes
+     /trip-offers/mine,
+     /trip-offers/:id/accept    -> tripOfferRoutes
 ================================================= */
 app.use("/", authRoutes);
 app.use("/reservations", reservationRoutes);
@@ -47,6 +61,7 @@ app.use("/filters", filterRoutes);
 app.use("/drivers", driverRoutes);
 app.use("/dispatch", dispatchRoutes);
 app.use("/vehicles", vehicleRoutes);
+app.use("/trip-offers", tripOfferRoutes);
 
 /* ==================== START ==================== */
 

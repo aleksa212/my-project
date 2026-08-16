@@ -30,8 +30,15 @@ export default function SelectedMenu({ selectedRows, setRowData, setSelectedRows
         PUtime: ""
     });
 
+    // Stays mounted at all times (rather than the previous early
+    // `return null`) so the panel can slide in/out with a CSS
+    // transition instead of popping in/out instantly -- an unmounted
+    // component can't animate its own exit.
+    const rows = selectedRows || [];
+    const isOpen = rows.length > 0;
+
     useEffect(() => {
-        if (selectedRows.length === 0) return;
+        if (rows.length === 0) return;
 
         setForm({
             Status: "",
@@ -40,12 +47,27 @@ export default function SelectedMenu({ selectedRows, setRowData, setSelectedRows
             Driver: "",
             PUtime: ""
         });
-    }, [selectedRows]);
-
-    if (!selectedRows || selectedRows.length === 0) return null;
+    }, [rows.length]);
 
     const handleChange = (e) => {
         setForm({ ...form, [e.target.name]: e.target.value });
+    };
+
+    // Covered by Uber instead of the in-house fleet -- no driver/vehicle
+    // makes sense alongside either status, so picking one clears both
+    // right in the form (the backend enforces the same thing regardless,
+    // but this keeps what's about to be applied visible before Apply is
+    // even clicked).
+    const UBER_STATUSES = ["Order Uber", "Uber OTW"];
+    const handleStatusChange = (e) => {
+        const Status = e.target.value;
+        setForm(prev => ({
+            ...prev,
+            Status,
+            ...(UBER_STATUSES.includes(Status)
+                ? { Driver: UNASSIGNED_VALUE, VEHnumber: UNASSIGNED_VALUE, VEHtype: "" }
+                : {})
+        }));
     };
 
     const handleSave = async () => {
@@ -63,7 +85,7 @@ export default function SelectedMenu({ selectedRows, setRowData, setSelectedRows
             );
 
             const updates = await Promise.all(
-                selectedRows.map(async (row) => {
+                rows.map(async (row) => {
                     const res = await fetch(`http://localhost:5000/reservations/${row._id}`, {
                         method: "PUT",
                         headers: {
@@ -121,7 +143,7 @@ export default function SelectedMenu({ selectedRows, setRowData, setSelectedRows
     // shared value across the whole selection. Rows with no FLTactual
     // yet (hotel pickups, or an airport pickup that hasn't matched a
     // flight yet) are silently skipped rather than blocking the rest.
-    const matchableRows = selectedRows.filter(r => r.FLTactual);
+    const matchableRows = rows.filter(r => r.FLTactual);
 
     const handleMatchFlightActual = async () => {
         if (matchableRows.length === 0) return;
@@ -183,9 +205,9 @@ export default function SelectedMenu({ selectedRows, setRowData, setSelectedRows
 
     const handleSwap = async () => {
         const token = localStorage.getItem("token");
-        if (selectedRows.length !== 2) return;
+        if (rows.length !== 2) return;
 
-        const [a, b] = selectedRows;
+        const [a, b] = rows;
 
         const swapPayloadA = {
             VEHtype: getVehicleType(b.VEHnumber),
@@ -259,16 +281,29 @@ export default function SelectedMenu({ selectedRows, setRowData, setSelectedRows
     };
 
     return (
-        <div className="fixed top-0 right-0 h-full w-80 bg-white shadow-xl border-l z-50 p-4">
-            <h2 className="text-lg font-semibold mb-4">Bulk Edit ({selectedRows.length})</h2>
+        <div
+            className={`fixed top-0 right-0 h-full w-80 bg-white shadow-xl border-l z-50 p-4 transition-transform duration-300 ease-in-out ${
+                isOpen ? "translate-x-0" : "translate-x-full pointer-events-none"
+            }`}
+            aria-hidden={!isOpen}
+        >
+            <h2 className="text-lg font-semibold mb-4">Bulk Edit ({rows.length})</h2>
 
-            <select name="Status" value={form.Status} onChange={handleChange} className="border p-2 w-full mb-2">
+            <select name="Status" value={form.Status} onChange={handleStatusChange} className="border p-2 w-full mb-2">
                 <option value="">Status</option>
                 <option value="Unassigned">Unassigned</option>
                 <option value="dispatched">Dispatched</option>
                 <option value="accepted">Accepted</option>
                 <option value="confirmed">Confirmed</option>
                 <option value="needs attention">Needs Attention</option>
+                <option value="Crew called">Crew called</option>
+                <option value="On the way">On the way</option>
+                <option value="Arrived">Arrived</option>
+                <option value="No show">No show</option>
+                <option value="Done">Done</option>
+                <option value="Cancelled">Cancelled</option>
+                <option value="Order Uber">Order Uber</option>
+                <option value="Uber OTW">Uber OTW</option>
             </select>
 
             <Select
@@ -322,7 +357,7 @@ export default function SelectedMenu({ selectedRows, setRowData, setSelectedRows
             </div>
 
             <button onClick={handleSave} className="bg-blue-600 text-white w-full p-2 rounded">
-                Apply to {selectedRows.length} rows
+                Apply to {rows.length} rows
             </button>
 
             <button
@@ -333,7 +368,7 @@ export default function SelectedMenu({ selectedRows, setRowData, setSelectedRows
                 Update PU Time to Flight Actual ({matchableRows.length})
             </button>
 
-            {selectedRows.length === 2 && (
+            {rows.length === 2 && (
                 <button onClick={handleSwap} className="bg-orange-500 text-white w-full p-2 rounded mt-2">
                     Swap Drivers
                 </button>

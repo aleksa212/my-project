@@ -6,14 +6,89 @@ import { getVehicleType } from "../utils/vehicles.js";
 import { createLogs } from "../utils/logs.js";
 import { claimNextTripNumber, releaseTripNumber } from "../utils/tripNumbers.js";
 import { getAirportArrivals, matchFlight, summarizeArrival } from "../utils/flightAware.js";
+import { cancelPendingOfferForTrip } from "../utils/tripOfferEngine.js";
 
 const router = express.Router();
 
-/* ==================== GET ALL ==================== */
+// Covered by Uber instead of the in-house fleet -- these two statuses
+// never carry a Driver/vehicle, enforced below regardless of what a
+// client also sends for those fields in the same request.
+const UBER_STATUSES = ["Order Uber", "Uber OTW"];
+
+/* ==================== GET ALL (PAGINATED) ====================
+   Server-side pagination + filtering, mirroring what Table.jsx used to
+   do client-side over the full collection. Necessary once the
+   collection grows into the thousands — fetching and re-filtering
+   every reservation on every keystroke doesn't stay fast at that size,
+   whereas a scoped, indexed-ish Mongo query + skip/limit does. Search
+   text is matched against the same fields the old client-side
+   searchBlob covered (minus PUdate, which is a Date field and has its
+   own dedicated `date` param instead of free-text matching).
+================================================================= */
+
+const SEARCH_FIELDS = [
+    "Status", "PUtime", "PUlocation", "PUlocationCode",
+    "DOlocation", "DOlocationCode", "FlightNumber",
+    "FLTscheduled", "FLTactual", "FLTstatus",
+    "VEHtype", "VEHnumber", "Driver", "PAX", "TripInfo"
+];
+
+const escapeRegex = (str) => str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 router.get("/", async (req, res) => {
-    const data = await Reservation.find();
-    res.json(data);
+    try {
+        const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+        const limit = Math.min(500, Math.max(1, parseInt(req.query.limit, 10) || 100));
+
+        const search = (req.query.search || "").trim();
+        const idSearch = (req.query.idSearch || "").trim();
+        const date = (req.query.date || "").trim();
+        const airportCodes = (req.query.airportFilter || "")
+            .split(",")
+            .map(c => c.trim())
+            .filter(Boolean);
+
+        const conditions = [];
+
+        // Matches the old client behavior: an ID search takes over the
+        // date filter entirely rather than combining with it.
+        if (idSearch) {
+            const num = Number(idSearch);
+            conditions.push({ tripNumber: Number.isNaN(num) ? -1 : num });
+        } else if (date) {
+            // PUdate is stored as UTC midnight of the intended calendar
+            // day (see PUdate handling below and in autoDispatch.js).
+            conditions.push({ PUdate: new Date(`${date}T00:00:00.000Z`) });
+        }
+
+        if (airportCodes.length) {
+            conditions.push({
+                $or: [
+                    { PUlocationCode: { $in: airportCodes } },
+                    { DOlocationCode: { $in: airportCodes } }
+                ]
+            });
+        }
+
+        if (search) {
+            const regex = new RegExp(escapeRegex(search), "i");
+            conditions.push({ $or: SEARCH_FIELDS.map(field => ({ [field]: regex })) });
+        }
+
+        const filter = conditions.length ? { $and: conditions } : {};
+
+        const [data, total] = await Promise.all([
+            Reservation.find(filter)
+                .sort({ PUdate: 1, PUtime: 1 })
+                .skip((page - 1) * limit)
+                .limit(limit),
+            Reservation.countDocuments(filter)
+        ]);
+
+        res.json({ data, total, page, limit, totalPages: Math.max(1, Math.ceil(total / limit)) });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
 });
 
 /* ==================== TRIP NUMBER CLAIM/RELEASE ====================
@@ -157,6 +232,16 @@ router.put("/:id", auth, async (req, res) => {
 
         const updates = req.body;
 
+        // "Bidding" is system-managed only (see utils/tripOfferEngine.js)
+        // -- a dispatcher can dispatch a trip manually at any time (which
+        // takes priority and is handled below), but can't set this
+        // status directly.
+        if (updates.Status === "Bidding") {
+            return res.status(400).json({ error: "Status \"Bidding\" is system-managed and can't be set manually." });
+        }
+
+        const wasBidding = reservation.Status === "Bidding";
+
         // =========================
         // 1. SAFE FIELD UPDATE (NO OVERWRITES WITH UNDEFINED)
         // =========================
@@ -226,6 +311,19 @@ router.put("/:id", auth, async (req, res) => {
         }
 
         // =========================
+        // 2b2. UBER COVERAGE
+        // No in-house driver/vehicle on an Uber trip -- forced regardless
+        // of whatever the client also sent for those fields, so this can
+        // never drift into a trip that's simultaneously "Uber OTW" and
+        // holding onto a real driver/vehicle assignment.
+        // =========================
+        if (UBER_STATUSES.includes(safeUpdates.Status)) {
+            safeUpdates.Driver = "";
+            safeUpdates.VEHnumber = "";
+            safeUpdates.VEHtype = "";
+        }
+
+        // =========================
         // 2c. ASSIGNMENT SOURCE TRACKING
         // Manual edits to Driver/VEHnumber always take priority over
         // auto-dispatch — mark the trip so a later auto-dispatch run
@@ -234,6 +332,8 @@ router.put("/:id", auth, async (req, res) => {
         // =========================
         if (safeUpdates.Status === "Unassigned") {
             safeUpdates.assignedBy = null;
+        } else if (UBER_STATUSES.includes(safeUpdates.Status)) {
+            safeUpdates.assignedBy = "uber";
         } else if (safeUpdates.Driver !== undefined || safeUpdates.VEHnumber !== undefined) {
             safeUpdates.assignedBy = "manual";
         }
@@ -278,6 +378,13 @@ router.put("/:id", auth, async (req, res) => {
         }
 
         await reservation.save();
+
+        // A dispatcher's manual edit always wins over a pending offer --
+        // if this trip was out for driver self-accept, that offer is now
+        // moot regardless of what specifically changed.
+        if (wasBidding && reservation.Status !== "Bidding") {
+            await cancelPendingOfferForTrip(reservation._id);
+        }
 
         res.json(reservation);
     } catch (err) {

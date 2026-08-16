@@ -4,6 +4,7 @@ import { runAutoDispatch, findScheduleConflicts } from "../utils/autoDispatch.js
 import { Reservation } from "../models/Reservation.js";
 import { getVehicleType } from "../utils/vehicles.js";
 import { createLogs } from "../utils/logs.js";
+import { cancelPendingOfferForTrip } from "../utils/tripOfferEngine.js";
 
 const router = express.Router();
 
@@ -33,6 +34,8 @@ router.post("/commit", auth, async (req, res) => {
             const reservation = await Reservation.findById(a.tripId);
             if (!reservation) continue;
 
+            const wasBidding = reservation.Status === "Bidding";
+
             const updates = {
                 Driver: a.driverName,
                 VEHnumber: a.vehicleNumber,
@@ -54,6 +57,11 @@ router.post("/commit", auth, async (req, res) => {
             if (logs.length) reservation.logs.push(...logs);
 
             await reservation.save();
+
+            // A dispatcher running Auto Dispatch on a stalled "Bidding"
+            // trip always wins over the offer system it came from.
+            if (wasBidding) await cancelPendingOfferForTrip(reservation._id);
+
             updated.push(reservation);
         }
 

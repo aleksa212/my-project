@@ -39,6 +39,26 @@ const NEAR_HORIZON_MINUTES = 6 * 60;
 // not minutes.
 const FAR_CHECK_INTERVAL_MS = 4 * 60 * 60 * 1000;
 
+// How often a near trip gets a one-off per-flight lookup fallback when
+// the board alone can't be trusted -- two distinct cases:
+//   - Never checked by anything yet (flightLastCheckedAt is null): a
+//     trip created within NEAR_HORIZON_MINUTES of its own pickup skips
+//     the far tier entirely and never gets the seed lookup that would
+//     otherwise populate at least its scheduled time. Without this,
+//     it shows nothing at all until the board happens to pick it up
+//     near departure -- worse than the one-time cost of just asking.
+//   - Overdue (reference time already passed, still unresolved): the
+//     board indexes by each flight's SCHEDULED slot, not its real/
+//     estimated one, so a delayed flight's scheduled slot can pass
+//     while it's still genuinely en route, making it invisible on the
+//     board the whole time (confirmed live: a flight 55 min delayed,
+//     91% en route, never once appeared on the board).
+// Tighter than FAR_CHECK_INTERVAL_MS since both cases are more urgent
+// than routine far-out re-seeding, but still gated so a trip that's
+// already been seeded once and is still ahead of schedule doesn't get
+// re-checked on every single 5-min tick while waiting on the board.
+const OVERDUE_FALLBACK_INTERVAL_MS = 15 * 60 * 1000;
+
 // Once inside NEAR_HORIZON_MINUTES, an airport's shared board is polled
 // on this same near/far urgency curve -- tightest right before pickup,
 // looser the further out the airport's nearest pending trip still is.
@@ -91,9 +111,11 @@ async function refreshFarTrip(trip, timeZone, now) {
     return updated;
 }
 
-async function refreshAirportBoard(airportCode, nearTrips) {
+async function refreshAirportBoard(airportCode, nearTrips, now) {
     let boardUpdated = 0;
     let boardErrors = 0;
+    let fallbackChecked = 0;
+    let fallbackUpdated = 0;
 
     let arrivals;
     try {
@@ -103,24 +125,58 @@ async function refreshAirportBoard(airportCode, nearTrips) {
         return {
             boardUpdated,
             boardErrors: nearTrips.length,
+            fallbackChecked,
+            fallbackUpdated,
             capped: err.message.includes("monthly query cap reached")
         };
     }
 
-    for (const { trip, timeZone } of nearTrips) {
+    for (const { trip, timeZone, minutesUntil } of nearTrips) {
         try {
             const expectedDate = new Date(trip.PUdate).toISOString().slice(0, 10);
             const flight = matchFlight(arrivals, trip.FlightNumber, { expectedDate, timeZone });
-            if (!flight) continue;
 
-            const { FLTscheduled, FLTactual, FLTstatus } = summarizeArrival(flight, timeZone);
-            if (trip.FLTscheduled !== FLTscheduled || trip.FLTactual !== FLTactual || trip.FLTstatus !== FLTstatus) {
-                trip.FLTscheduled = FLTscheduled;
-                trip.FLTactual = FLTactual;
-                trip.FLTstatus = FLTstatus;
-                await trip.save();
-                boardUpdated++;
+            if (flight) {
+                const { FLTscheduled, FLTactual, FLTstatus } = summarizeArrival(flight, timeZone);
+                if (trip.FLTscheduled !== FLTscheduled || trip.FLTactual !== FLTactual || trip.FLTstatus !== FLTstatus) {
+                    trip.FLTscheduled = FLTscheduled;
+                    trip.FLTactual = FLTactual;
+                    trip.FLTstatus = FLTstatus;
+                    await trip.save();
+                    boardUpdated++;
+                }
+                continue;
             }
+
+            // Not on the board. Falls back to a per-flight lookup only
+            // when the board genuinely can't be relied on to catch up on
+            // its own -- never-checked (needs at least a seeded
+            // scheduled time) or overdue (see OVERDUE_FALLBACK_INTERVAL_MS
+            // above). A trip that's already been seeded once and is
+            // still ahead of schedule just keeps waiting on the board,
+            // same as before.
+            const neverChecked = !trip.flightLastCheckedAt;
+            const overdue = minutesUntil < 0;
+            if (!neverChecked && !overdue) continue;
+
+            const dueAt = trip.flightLastCheckedAt
+                ? trip.flightLastCheckedAt.getTime() + OVERDUE_FALLBACK_INTERVAL_MS
+                : 0;
+            if (now.getTime() < dueAt) continue;
+
+            fallbackChecked++;
+            const fallbackFlight = await getFlightByIdent(trip.FlightNumber, expectedDate, timeZone);
+            trip.flightLastCheckedAt = now;
+            if (fallbackFlight) {
+                const { FLTscheduled, FLTactual, FLTstatus } = summarizeArrival(fallbackFlight, timeZone);
+                if (trip.FLTscheduled !== FLTscheduled || trip.FLTactual !== FLTactual || trip.FLTstatus !== FLTstatus) {
+                    trip.FLTscheduled = FLTscheduled;
+                    trip.FLTactual = FLTactual;
+                    trip.FLTstatus = FLTstatus;
+                    fallbackUpdated++;
+                }
+            }
+            await trip.save();
         } catch (err) {
             boardErrors++;
             console.error(
@@ -130,7 +186,7 @@ async function refreshAirportBoard(airportCode, nearTrips) {
         }
     }
 
-    return { boardUpdated, boardErrors, capped: false };
+    return { boardUpdated, boardErrors, fallbackChecked, fallbackUpdated, capped: false };
 }
 
 /**
@@ -203,7 +259,7 @@ export async function refreshPendingFlights() {
         }
     }
 
-    let boardsPolled = 0, nearUpdated = 0, nearErrors = 0;
+    let boardsPolled = 0, nearUpdated = 0, nearErrors = 0, overdueFallbackChecked = 0, overdueFallbackUpdated = 0;
     for (const [airportCode, group] of nearByAirport) {
         const nearestMinutes = Math.min(...group.map(g => Math.abs(g.minutesUntil)));
         const interval = requiredBoardIntervalMs(nearestMinutes);
@@ -212,9 +268,11 @@ export async function refreshPendingFlights() {
 
         boardsPolled++;
         airportLastCheckedAt.set(airportCode, now.getTime());
-        const { boardUpdated, boardErrors, capped } = await refreshAirportBoard(airportCode, group);
+        const { boardUpdated, boardErrors, fallbackChecked, fallbackUpdated, capped } = await refreshAirportBoard(airportCode, group, now);
         nearUpdated += boardUpdated;
         nearErrors += boardErrors;
+        overdueFallbackChecked += fallbackChecked;
+        overdueFallbackUpdated += fallbackUpdated;
         if (capped) break;
     }
 
@@ -228,6 +286,8 @@ export async function refreshPendingFlights() {
         nearTripsSeen,
         nearUpdated,
         nearErrors,
+        overdueFallbackChecked,
+        overdueFallbackUpdated,
         candidateCount: candidates.length
     };
 }
@@ -256,6 +316,7 @@ export function startFlightStatusPolling(intervalMs) {
                 const {
                     farChecked, farUpdated, farErrors,
                     boardsPolled, nearTripsSeen, nearUpdated, nearErrors,
+                    overdueFallbackChecked, overdueFallbackUpdated,
                     candidateCount
                 } = stats;
 
@@ -266,6 +327,7 @@ export function startFlightStatusPolling(intervalMs) {
                         `${farChecked} far-out checked (${farUpdated} updated${farErrors ? `, ${farErrors} failed` : ""}), ` +
                         `${boardsPolled} airport board(s) polled covering ${nearTripsSeen} near trip(s) ` +
                         `(${nearUpdated} updated${nearErrors ? `, ${nearErrors} failed` : ""})` +
+                        (overdueFallbackChecked ? `, ${overdueFallbackChecked} overdue fallback lookup(s) (${overdueFallbackUpdated} updated)` : "") +
                         (usage ? ` — AeroAPI usage: ${usage.count}/${usage.limit} this month` : "")
                     );
                 }

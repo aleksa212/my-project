@@ -72,6 +72,48 @@ export default function TripDetailsFields({ values, setFieldValue }) {
             </div>
 
             {/* =====================
+                STOPS (optional, in order between PU and DO) --
+                non-airline rides only; doesn't touch anything the
+                airline/flight-tracking flow depends on.
+            ===================== */}
+            {(values.stops || []).map((stop, i) => (
+                <div key={i} className="flex gap-2 items-center">
+                    <div className="flex-1">
+                        <CreatableSelect
+                            options={locationOptions}
+                            value={toOption(stop)}
+                            onChange={(selected) => {
+                                const next = [...values.stops];
+                                next[i] = selected?.value || "";
+                                setFieldValue("stops", next);
+                            }}
+                            isClearable
+                            placeholder={`Stop ${i + 1} — pick from list or type custom address`}
+                            formatCreateLabel={(input) => `Use address: "${input}"`}
+                            noOptionsMessage={() => "Select an Area above to see options, or type a custom address"}
+                            styles={selectStyles}
+                        />
+                    </div>
+                    <button
+                        type="button"
+                        onClick={() => setFieldValue("stops", values.stops.filter((_, idx) => idx !== i))}
+                        className="text-gray-400 hover:text-red-600 text-lg leading-none px-1"
+                        title="Remove stop"
+                    >
+                        ✕
+                    </button>
+                </div>
+            ))}
+
+            <button
+                type="button"
+                onClick={() => setFieldValue("stops", [...(values.stops || []), ""])}
+                className="text-sm text-indigo-600 hover:text-indigo-800 self-start"
+            >
+                + Add Stop
+            </button>
+
+            {/* =====================
                 DO LOCATION
             ===================== */}
             <div>

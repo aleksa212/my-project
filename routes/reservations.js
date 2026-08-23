@@ -258,6 +258,7 @@ router.put("/:id", auth, async (req, res) => {
             "Area",
             "PUlocation",
             "DOlocation",
+            "stops",
             "PUdate",
             "PUtime",
             "FlightNumber",

@@ -95,11 +95,23 @@ export function Table({
     };
 
     const handleMapping = (data) => {
-        const { PUlocation, DOlocation } = data;
-        window.open(
-            `https://www.google.com/maps/dir/?api=1&origin=${encodeURIComponent(resolveLocation(PUlocation))}&destination=${encodeURIComponent(resolveLocation(DOlocation))}&travelmode=driving`,
-            "_blank"
-        );
+        const { PUlocation, DOlocation, stops } = data;
+
+        const params = new URLSearchParams({
+            api: "1",
+            origin: resolveLocation(PUlocation),
+            destination: resolveLocation(DOlocation),
+            travelmode: "driving"
+        });
+
+        // Non-airline, multi-stop trips only -- absent for everything
+        // else, so this is a no-op for the airport-pickup flow.
+        const routeStops = (stops || []).filter(Boolean);
+        if (routeStops.length > 0) {
+            params.set("waypoints", routeStops.map(resolveLocation).join("|"));
+        }
+
+        window.open(`https://www.google.com/maps/dir/?${params.toString()}`, "_blank");
     };
 
     const handleCopyTrip = async (data) => {

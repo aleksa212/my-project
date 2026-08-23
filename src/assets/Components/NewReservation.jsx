@@ -95,6 +95,7 @@ const NewReservation = ({
     const initialValues = {
         PUlocation: selectedReservation?.PUlocation || '',
         DOlocation: selectedReservation?.DOlocation || '',
+        stops: selectedReservation?.stops || [],
         Area: selectedReservation?.Area || "",
         PUdate: selectedReservation?.PUdate
             ? new Date(selectedReservation.PUdate).toISOString().split("T")[0]

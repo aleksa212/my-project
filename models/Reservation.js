@@ -58,6 +58,14 @@ const ReservationSchema = new mongoose.Schema({
     DOlocationCode: { type: String, default: "" },
     DOlocationName: { type: String, default: "" },
 
+    // Extra addresses visited between pickup and final drop-off, in
+    // order -- for non-airport trips where a rider needs multiple stops
+    // (a bar crawl, a few errands, etc). Kept as plain address strings
+    // like PUlocation/DOlocation, deliberately without their own
+    // Code/Name airport-resolution pair since a stop is never itself an
+    // airport pickup/dropoff in the flight-tracking sense.
+    stops: { type: [String], default: [] },
+
     PUdate: { type: Date, required: true },
     PUtime: { type: String, required: true },
     FlightNumber: { type: String, required: true },

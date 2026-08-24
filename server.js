@@ -7,6 +7,7 @@ import { connectDB } from "./config/db.js";
 import authRoutes from "./routes/auth.js";
 import driverAuthRoutes from "./routes/driverAuth.js";
 import driverTripsRoutes from "./routes/driverTrips.js";
+import driverLocationRoutes from "./routes/driverLocation.js";
 import reservationRoutes from "./routes/reservations.js";
 import filterRoutes from "./routes/filters.js";
 import driverRoutes from "./routes/Drivers.js";
@@ -55,6 +56,8 @@ startFlightStatusPolling(FLIGHT_STATUS_POLL_INTERVAL_MS);
      /driver-auth/register,
      /driver-auth/login         -> driverAuthRoutes (driver app login)
      /driver-trips/mine         -> driverTripsRoutes (driver app trip list)
+     /driver-location           -> driverLocationRoutes (driver app
+                                    location ping + dispatcher map read)
      /reservations, /reservations/:id, ...
                                  -> reservationRoutes
      /filters, /filters/:name   -> filterRoutes
@@ -67,6 +70,7 @@ startFlightStatusPolling(FLIGHT_STATUS_POLL_INTERVAL_MS);
 app.use("/", authRoutes);
 app.use("/driver-auth", driverAuthRoutes);
 app.use("/driver-trips", driverTripsRoutes);
+app.use("/driver-location", driverLocationRoutes);
 app.use("/reservations", reservationRoutes);
 app.use("/filters", filterRoutes);
 app.use("/drivers", driverRoutes);

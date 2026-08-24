@@ -190,6 +190,13 @@ export function Header({
                 Schedule
             </button>
 
+            <button
+                className="p-1 rounded-sm border-0 bg-green-700 hover:shadow-xl hover:bg-green-800 text-white"
+                onClick={() => window.open("/map", "_blank")}
+            >
+                Map
+            </button>
+
             <div className="flex gap-2 flex-wrap w-full mt-2">
                 {airportFilter.map(code => (
                     <span

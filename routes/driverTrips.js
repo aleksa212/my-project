@@ -48,9 +48,11 @@ const parseRequestedDate = (value) => {
        live in Completed instead so a trip isn't shown
        twice).
      - completed: Status in COMPLETED_STATUSES (Done or
-       No show), bounded to the last 60 days so this
-       never turns into an unbounded query as history
-       piles up.
+       No show) for the same single selected date as
+       current -- same ?date=YYYY-MM-DD/today-default
+       behavior, so switching the date picker moves
+       both tabs together rather than Completed staying
+       stuck showing history from every day at once.
    Driver identity comes from the verified JWT
    (req.driver), not a client-supplied id -- unlike
    the older /trip-offers/mine, which still trusts a
@@ -61,8 +63,6 @@ router.get("/mine", driverAuth, async (req, res) => {
         const driverName = req.driver.displayName;
         const requestedDate = parseRequestedDate(req.query.date);
         const nextDay = new Date(requestedDate.getTime() + 86400000);
-        const today = todayUtcMidnight();
-        const pastBound = new Date(today.getTime() - 60 * 86400000);
 
         const [current, pending, completed] = await Promise.all([
             Reservation.find({
@@ -78,9 +78,9 @@ router.get("/mine", driverAuth, async (req, res) => {
 
             Reservation.find({
                 Driver: driverName,
-                Status: { $in: COMPLETED_STATUSES },
-                PUdate: { $gte: pastBound }
-            }).sort({ PUdate: -1, PUtime: -1 })
+                PUdate: { $gte: requestedDate, $lt: nextDay },
+                Status: { $in: COMPLETED_STATUSES }
+            }).sort({ PUtime: -1 })
         ]);
 
         res.json({ current, pending, completed });

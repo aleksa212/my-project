@@ -63,7 +63,19 @@ const DriverSchema = new mongoose.Schema({
  
     // Soft-disable a driver (they left, they're on leave, etc.)
     // without deleting their history/logs.
-    active: { type: Boolean, default: true }
+    active: { type: Boolean, default: true },
+
+    // Latest known position from the driver app's background location
+    // ping (see routes/driverLocation.js) -- just the last point, not a
+    // history/track log, since the dispatcher map only needs to show
+    // where a driver is right now. `updatedAt` lets the map (and the
+    // GET endpoint) tell a live position apart from a stale one, e.g. a
+    // driver whose phone died or who force-quit the app hours ago.
+    location: {
+        lat: { type: Number, default: null },
+        lng: { type: Number, default: null },
+        updatedAt: { type: Date, default: null }
+    }
 });
  
 DriverSchema.virtual("displayName").get(function () {

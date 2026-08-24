@@ -299,6 +299,8 @@ export default function SelectedMenu({ selectedRows, setRowData, setSelectedRows
                 <option value="Crew called">Crew called</option>
                 <option value="On the way">On the way</option>
                 <option value="Arrived">Arrived</option>
+                <option value="Customer in car">Customer in car</option>
+                <option value="Request no show">Request no show</option>
                 <option value="No show">No show</option>
                 <option value="Done">Done</option>
                 <option value="Cancelled">Cancelled</option>

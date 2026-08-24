@@ -40,8 +40,22 @@ const DriverSchema = new mongoose.Schema({
     airportCode: { type: String, required: true },
  
     phone: String,
-    email: String,
- 
+    // unique+sparse rather than a hard unique -- a driver added by a
+    // dispatcher with no email yet shouldn't collide with every other
+    // email-less driver, but two drivers can't share one once set. This
+    // is also now the driver app's login identifier (see
+    // routes/driverAuth.js), which is the actual reason uniqueness
+    // matters here.
+    email: { type: String, default: "", unique: true, sparse: true },
+
+    // Only ever set by the driver themselves via the driver app's
+    // register flow (routes/driverAuth.js) -- a dispatcher creating a
+    // driver through the web app's Drivers management never sets this.
+    // `select: false` keeps the hash out of every normal Driver query
+    // (e.g. the web app's driver list) so it's never accidentally sent
+    // to a client that has no business seeing it.
+    password: { type: String, default: null, select: false },
+
     // Recurring weekly availability. A driver can have multiple
     // entries for the same day if their shift has a split (rare,
     // but cheaper to support now than to migrate later).

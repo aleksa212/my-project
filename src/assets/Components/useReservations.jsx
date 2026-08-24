@@ -35,31 +35,14 @@ export function useReservations({
         return params;
     }, [page, limit, searchText, idSearch, selectedDate, airportFilterKey]);
 
-    // The reactive fetch (runs whenever the page/filters/refreshKey
-    // change) is inlined here rather than delegating to a shared
-    // function -- an effect's own top-level fetch-then-setState is the
-    // ordinary data-fetching pattern; a re-fetch triggered elsewhere
-    // (copyTrip/removeTrip below) is a separate, deliberate imperative
-    // call, not something this effect needs to also own.
-    useEffect(() => {
-        setLoading(true);
-        fetch(`http://localhost:5000/reservations?${buildQuery().toString()}`)
-            .then(res => res.json())
-            .then(({ data, total, totalPages }) => {
-                setRowData(data || []);
-                setTotal(total || 0);
-                setTotalPages(totalPages || 1);
-            })
-            .catch(console.error)
-            .finally(() => setLoading(false));
-    }, [refreshKey, buildQuery]);
-
-    // Used by copyTrip/removeTrip below to re-sync this page with the
-    // server after a mutation, rather than guessing the correct local
-    // patch (which page a new/removed row belongs on isn't knowable
-    // client-side once results are paginated).
-    const fetchPage = useCallback(() => {
-        setLoading(true);
+    // Shared by the initial/filter-driven fetch, the imperative
+    // post-mutation re-fetch (copyTrip/removeTrip), and the background
+    // poll below -- `showLoading` is false only for the poll, so a
+    // driver-app status change appearing in the background never
+    // flashes the "Loading…" footer text or otherwise interrupts
+    // whatever the dispatcher is doing.
+    const fetchReservations = useCallback((showLoading = true) => {
+        if (showLoading) setLoading(true);
         return fetch(`http://localhost:5000/reservations?${buildQuery().toString()}`)
             .then(res => res.json())
             .then(({ data, total, totalPages }) => {
@@ -68,8 +51,30 @@ export function useReservations({
                 setTotalPages(totalPages || 1);
             })
             .catch(console.error)
-            .finally(() => setLoading(false));
+            .finally(() => { if (showLoading) setLoading(false); });
     }, [buildQuery]);
+
+    useEffect(() => {
+        fetchReservations(true);
+    }, [refreshKey, fetchReservations]);
+
+    // Background poll so a driver accepting/declining/advancing a trip
+    // from the driver app shows up here without the dispatcher having to
+    // manually refresh. Simple interval rather than websockets/SSE --
+    // this project has no push-notification infra yet, and a table that
+    // updates a few seconds later is fine for how it's actually used.
+    // Restarts on filter/page change since buildQuery changes.
+    const POLL_INTERVAL_MS = 8000;
+    useEffect(() => {
+        const interval = setInterval(() => fetchReservations(false), POLL_INTERVAL_MS);
+        return () => clearInterval(interval);
+    }, [fetchReservations]);
+
+    // Used by copyTrip/removeTrip below to re-sync this page with the
+    // server after a mutation, rather than guessing the correct local
+    // patch (which page a new/removed row belongs on isn't knowable
+    // client-side once results are paginated).
+    const fetchPage = useCallback(() => fetchReservations(true), [fetchReservations]);
 
     // ======================
     // COPY TRIP

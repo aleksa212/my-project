@@ -210,9 +210,14 @@ export function Table({
                                 case "Crew called": return { backgroundColor: "#93C5FD" };
                                 case "On the way": return { backgroundColor: "#C8A2C8" };
                                 case "Arrived": return { backgroundColor: "#F97316", color: "#ffffff" };
+                                case "Customer in car": return { backgroundColor: "#EC4899", color: "#ffffff" };
                                 // Terminal outcomes -- greyscale, darkest
                                 // for the most final/least-recoverable one.
                                 case "No show": return { backgroundColor: "#F3F4F6" };
+                                // Driver-flagged, not yet dispatcher-confirmed -- same
+                                // color as "No show" itself so it reads as the same
+                                // outcome at a glance, distinct only by its own label.
+                                case "Request no show": return { backgroundColor: "#F3F4F6" };
                                 case "Done": return { backgroundColor: "#D1D5DB" };
                                 case "Cancelled": return { backgroundColor: "#6B7280", color: "#ffffff" };
                                 default: return null;

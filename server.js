@@ -5,6 +5,8 @@ import cors from "cors";
 
 import { connectDB } from "./config/db.js";
 import authRoutes from "./routes/auth.js";
+import driverAuthRoutes from "./routes/driverAuth.js";
+import driverTripsRoutes from "./routes/driverTrips.js";
 import reservationRoutes from "./routes/reservations.js";
 import filterRoutes from "./routes/filters.js";
 import driverRoutes from "./routes/Drivers.js";
@@ -49,7 +51,10 @@ startFlightStatusPolling(FLIGHT_STATUS_POLL_INTERVAL_MS);
    Mount points preserve the exact same URLs the
    frontend already calls — no frontend changes
    needed:
-     /signup, /login            -> authRoutes
+     /signup, /login            -> authRoutes (dispatcher/web login)
+     /driver-auth/register,
+     /driver-auth/login         -> driverAuthRoutes (driver app login)
+     /driver-trips/mine         -> driverTripsRoutes (driver app trip list)
      /reservations, /reservations/:id, ...
                                  -> reservationRoutes
      /filters, /filters/:name   -> filterRoutes
@@ -60,6 +65,8 @@ startFlightStatusPolling(FLIGHT_STATUS_POLL_INTERVAL_MS);
    /trip-offers/* is not mounted -- see the Bidding system note above.
 ================================================= */
 app.use("/", authRoutes);
+app.use("/driver-auth", driverAuthRoutes);
+app.use("/driver-trips", driverTripsRoutes);
 app.use("/reservations", reservationRoutes);
 app.use("/filters", filterRoutes);
 app.use("/drivers", driverRoutes);
